@@ -23,4 +23,4 @@ jobs:
       - name: 执行脚本
         env:
           SCKEY: ${{ secrets.SCKEY }}
-        run: python daily_push.py
+        run: python daily_push_qwen.py
