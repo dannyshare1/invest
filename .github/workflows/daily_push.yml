@@ -1,11 +1,10 @@
 name: 每日投资建议
 
 on:
-  push:
-    branches:
-      - main
   schedule:
     - cron: '0 0 * * *'  # UTC 时间每天 00:00 执行（北京时间 08:00）
+  # 手动运行按钮（可选）
+  workflow_dispatch:
 
 jobs:
   run-daily-push:
