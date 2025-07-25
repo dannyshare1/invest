@@ -44,12 +44,13 @@ prompt = f"""
 - 建议语言风格专业、简明，不要机械模板
 """
 
-# 调用通义千问（v1/chat/completions）接口
+# 调用通义千问（v1 接口）
 response = requests.post(
     url="https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
     headers={
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {QWEN_API_KEY}"
+        "Authorization": f"Bearer {QWEN_API_KEY}",
+        "X-DashScope-Workspace": "llm-c9d12emO0wxjtstn"  # ✅ 必填！
     },
     json={
         "model": "qwen-turbo",
