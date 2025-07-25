@@ -100,3 +100,18 @@ with open(log_path, "w", encoding="utf-8") as f:
         f.write("\n\n📌 仓位未发生变化，未记录当前结构。")
 
 print("✅ 推送完成！", res.status_code, res.text)
+
+# 推送到 Telegram
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+    telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    telegram_payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": f"{title}\n\n{qwen_reply.strip()}",
+        "parse_mode": "Markdown"
+    }
+    telegram_response = requests.post(telegram_url, json=telegram_payload)
+    print("📤 Telegram 推送：", telegram_response.status_code, telegram_response.text)
+
