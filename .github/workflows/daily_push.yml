@@ -1,4 +1,4 @@
-name: push
+name: 每日投资建议
 
 on:
   workflow_dispatch:
