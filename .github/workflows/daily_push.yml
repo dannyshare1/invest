@@ -1,30 +1,25 @@
 name: 每日投资建议
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 1 * * *'  # 每天 09:00 运行（UTC 时间）
+  push:
+    branches:
+      - main
 
 jobs:
   run-daily-push:
     runs-on: ubuntu-latest
-    env:
-      QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
-      SCKEY: ${{ secrets.SCKEY }}
-
     steps:
-      - name: 拉取代码
+      - name: Checkout 仓库代码
         uses: actions/checkout@v3
 
       - name: 设置 Python 环境
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: "3.10"
 
       - name: 安装依赖
-  run: |
-    pip install requests pyyaml
-
+        run: |
+          pip install requests pyyaml
 
       - name: 执行脚本
         run: python daily_push_qwen.py
