@@ -49,19 +49,20 @@ response = requests.post(
     url="https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
     headers={
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {QWEN_API_KEY}",
-        "X-DashScope-Workspace": "llm-c9d12emO0wxjtstn"  # ✅ 必填！
+        "Authorization": f"Bearer {QWEN_API_KEY}"
     },
     json={
-        "model": "qwen-turbo",
+        "model": "qwen-plus",  # ← 或你控制台可用的模型名
         "input": {
             "prompt": prompt
         },
         "parameters": {
             "result_format": "message"
-        }
+        },
+        "workspace": "ilm-c9d12em00wxjtstn"  # ← 改成你截图中的“默认业务空间 ID”
     }
 )
+
 
 if response.status_code != 200:
     raise Exception("通义千问 API 调用失败: " + response.text)
