@@ -3,12 +3,16 @@ name: 每日投资建议
 on:
   schedule:
     - cron: '0 0 * * *'  # UTC 时间每天 00:00 执行（北京时间 08:00）
-  # 手动运行按钮（可选）
   workflow_dispatch:
 
 jobs:
   run-daily-push:
     runs-on: ubuntu-latest
+    env:
+      SCKEY: ${{ secrets.SCKEY }}
+      QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     steps:
       - name: Checkout 仓库代码
         uses: actions/checkout@v3
@@ -24,6 +28,3 @@ jobs:
 
       - name: 执行每日推送脚本
         run: python daily_push_qwen.py
-        env:
-          SCKEY: ${{ secrets.SCKEY }}
-          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
