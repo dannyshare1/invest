@@ -67,7 +67,7 @@ response = requests.post(
 if response.status_code != 200:
     raise Exception("通义千问 API 调用失败: " + response.text)
 
-qwen_reply = response.json()["output"]["text"]
+qwen_reply = response.json()["output"]["choices"][0]["message"]["content"]
 
 # 发送到 Server 酱
 push_url = f"https://sctapi.ftqq.com/{SCKEY}.send"
