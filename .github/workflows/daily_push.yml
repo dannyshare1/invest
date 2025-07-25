@@ -1,9 +1,8 @@
 name: 每日投资建议
 
 on:
-  push:
-    branches:
-      - main
+  schedule:
+    - cron: '0 0 * * *'  # 每天北京时间 8:00 运行
 
 jobs:
   run-daily-push:
