@@ -2,11 +2,14 @@ name: 每日投资建议
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 每天北京时间 8:00 运行
+    # 每天早上 8 点（UTC 时间 = 北京时间 - 8 小时）
+    - cron: '0 0 * * *'
+  workflow_dispatch:  # 支持手动触发
 
 jobs:
   run-daily-push:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout 仓库代码
         uses: actions/checkout@v3
@@ -20,5 +23,5 @@ jobs:
         run: |
           pip install requests pyyaml
 
-      - name: 执行脚本
+      - name: 执行每日推送脚本
         run: python daily_push_qwen.py
