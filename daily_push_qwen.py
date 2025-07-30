@@ -66,7 +66,7 @@ resp = requests.post(
         "Authorization": f"Bearer {QWEN_API_KEY}"
     },
     json={
-        "model": "qwen-plus",
+        "model": "qwen-max",
         "input": {"prompt": prompt},
         "parameters": {"result_format": "message"},
         "workspace": "ilm-c9d12em00wxjtstn"  # ← 请替换成你的 workspace ID
