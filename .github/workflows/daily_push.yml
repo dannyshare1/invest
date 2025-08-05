@@ -2,29 +2,32 @@ name: 每日投资建议
 
 on:
   schedule:
-   - cron: '50 23 * * *'  # UTC 23:50 = 北京时间 07:50
+    - cron: '50 23 * * *'     # UTC 23:50 = 北京 07:50
   workflow_dispatch:
 
 jobs:
   run-daily-push:
     runs-on: ubuntu-latest
     env:
-      SCKEY: ${{ secrets.SCKEY }}
-      QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SCKEY:                 ${{ secrets.SCKEY }}
+      QWEN_API_KEY:          ${{ secrets.QWEN_API_KEY }}
+      TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
+      NEWSAPI_KEY:           ${{ secrets.NEWSAPI_KEY }}
+      MEDIASTACK_KEY:        ${{ secrets.MEDIASTACK_KEY }}
     steps:
-      - name: Checkout 仓库代码
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
-      - name: 设置 Python 环境
+      - name: 设置 Python
         uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
+        with: { python-version: "3.10" }
 
       - name: 安装依赖
         run: |
-          pip install requests pyyaml
+          pip install requests pyyaml feedparser
 
-      - name: 执行每日推送脚本
-        run: python daily_push_qwen.py 
+      - name: 抓取新闻
+        run: python fetch_news.py
+
+      - name: 生成并推送投资建议
+        run: python daily_push_qwen.py
