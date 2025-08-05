@@ -116,22 +116,22 @@ def first_paragraphs(html, css="div.article p", max_len=200):
 # --------------------------------------------------------
 # 3. 财新网首页要闻 → 正文首段
 # --------------------------------------------------------
+ua = {"User-Agent": "Mozilla/5.0"}
 try:
-    ua = {"User-Agent": "Mozilla/5.0"}
     index = requests.get("https://www.caixin.com/", headers=ua, timeout=10).text
     soup  = BeautifulSoup(index, "lxml")
     links = [a["href"] for a in soup.select(".news_list a") if a["href"].startswith("https://")]
-count = 0
-for url in links[:MAX_PER_SRC]:
-    html = requests.get(url, headers=ua, timeout=10).text
-    soup_art = BeautifulSoup(html, "lxml")
-    title = soup_art.title.get_text(strip=True)
-    snippet = textrank_snippet(html)
-    add(title, snippet, "财新网", today.isoformat(), "CN_JSON")
-    count += 1
-print("财新网 抓到", count, "条")
+    count = 0
+    for url in links[:MAX_PER_SRC]:
+        html  = requests.get(url, headers=ua, timeout=10).text
+        title = BeautifulSoup(html, "lxml").title.get_text(strip=True)
+        snippet = first_paragraphs(html, "div.article p")
+        add(title, snippet, "财新网", today.isoformat(), "CN_JSON")
+        count += 1
+    print("财新网 抓到", count, "条")
 except Exception as e:
     print("财新网抓取失败:", e)
+
 
 # --------------------------------------------------------
 # 4. 新浪财经焦点新闻 → 正文首段
@@ -139,19 +139,19 @@ except Exception as e:
 try:
     sina_list = requests.get(
         "https://feed.sina.com.cn/api/roll/get",
-        params={"pageid":155, "lid":1686, "num":20},
+        params={"pageid": 155, "lid": 1686, "num": 20},
         timeout=10).json()
     ua = {"User-Agent": "Mozilla/5.0"}
-count = 0
-for it in sina_list["result"]["data"][:MAX_PER_SRC]:
-    html = requests.get(it["url"], headers=ua, timeout=10).text
-    snippet = textrank_snippet(html)
-    add(it["title"], snippet, "新浪财经", it["ctime"], "CN_JSON")
-    count += 1
-print("新浪财经 抓到", count, "条")
-
+    count = 0
+    for it in sina_list["result"]["data"][:MAX_PER_SRC]:
+        html = requests.get(it["url"], headers=ua, timeout=10).text
+        snippet = first_paragraphs(html, "div.article-content p")
+        add(it["title"], snippet, "新浪财经", it["ctime"], "CN_JSON")
+        count += 1
+    print("新浪财经 抓到", count, "条")
 except Exception as e:
     print("新浪财经抓取失败:", e)
+
 
 # --------------------------------------------------------
 # 统计 + 去重
