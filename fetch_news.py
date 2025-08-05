@@ -15,7 +15,7 @@ def clean_html(raw_html: str) -> str:
         tag.decompose()
     return soup.get_text("\n")
 
-def make_snippet(raw_html: str, css: str, max_len: int = 200) -> str:
+def make_snippet(raw_html: str, css: str, max_len: int = 250) -> str:
     soup = BeautifulSoup(raw_html, "lxml")
     paras = [p.get_text(" ", strip=True) for p in soup.select(css)[:3]]
     text  = " ".join(paras) or clean_html(raw_html)[:max_len]
@@ -49,7 +49,7 @@ def add(title, snippet, src, pub, origin):
     if title and snippet:
         news_items.append({
             "title": title.strip(),
-            "snippet": snippet.strip()[:250],
+            "snippet": snippet.strip()[:350],
             "source": src,
             "published": pub[:10],
             "origin": origin
@@ -98,15 +98,16 @@ if MEDIASTACK_KEY:
 try:
     ua = {"User-Agent": "Mozilla/5.0"}
     idx_html = requests.get("https://www.caixin.com/", headers=ua, timeout=10).text
-    links = [a["href"] for a in BeautifulSoup(idx_html, "lxml").select(".news_list a")
-             if a["href"].startswith("https://")][:MAX_PER_SRC]
+    links = [a["href"] for a in BeautifulSoup(idx_html, "lxml")
+             .select(".title_list a, .news_list a")][:MAX_PER_SRC]
     count = 0
     for url in links:
         r = requests.get(url, headers=ua, timeout=10)
         r.encoding = r.apparent_encoding
-        title   = BeautifulSoup(r.text, "lxml").title.get_text(strip=True)
-        snippet = make_snippet(r.text, "div.article p")
-        txt = re.sub(r"[^\w\u4e00-\u9fa5]", "", (title + snippet).lower())
+        soup_art = BeautifulSoup(r.text, "lxml")
+        title   = soup_art.title.get_text(strip=True)          # ❶ 获取标题
+        snippet = make_snippet(r.text, "article p, div.article p")
+        txt     = re.sub(r"[^\w\u4e00-\u9fa5]", "", (title + snippet).lower())
         if not any(k in txt for k in INV_KWS):
             continue
         add(title, snippet, "财新网", today.isoformat(), "CN_JSON")
@@ -118,17 +119,18 @@ except Exception as e:
 # ---------- 4. 新浪财经 ---------- #
 try:
     feed = requests.get("https://feed.sina.com.cn/api/roll/get",
-                        params={"pageid":155, "lid":1686, "num":30},
+                        params={"pageid": 155, "lid": 1686, "num": 30},
                         timeout=10).json()
     ua = {"User-Agent": "Mozilla/5.0"}
     count = 0
     for it in feed["result"]["data"]:
-        if not it["url"].startswith("https://finance.sina.com.cn/stock"):
+        if not it["url"].startswith("https://finance.sina.com.cn/"):
             continue
         r = requests.get(it["url"], headers=ua, timeout=10)
         r.encoding = r.apparent_encoding
-        snippet = make_snippet(r.text, "div.article p, div.article-content p")
-        txt = re.sub(r"[^\w\u4e00-\u9fa5]", "", (it["title"] + snippet).lower())
+        soup_art = BeautifulSoup(r.text, "lxml")
+        snippet  = make_snippet(r.text, "article p, div.article p, p")
+        txt      = re.sub(r"[^\w\u4e00-\u9fa5]", "", (it["title"] + snippet).lower())
         if not any(k in txt for k in INV_KWS):
             continue
         add(it["title"], snippet, "新浪财经", it["ctime"], "CN_JSON")
