@@ -36,7 +36,7 @@ def add(title, snippet, src, pub, origin):
     if title and snippet:
         news_items.append({
             "title": title.strip(),
-            "snippet": snippet.strip()[:120],
+            "snippet": snippet.strip()[:200],
             "source": src,
             "published": pub[:10],
             "origin": origin
