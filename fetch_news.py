@@ -90,7 +90,14 @@ if MEDIASTACK_KEY:
                 art["source"],
                 art["published_at"],
                 "MEDIASTACK")
-
+            
+# ---- 提取正文前两段作为摘要 ----
+def first_paragraphs(html, css="div.article p", max_len=200):
+    soup = BeautifulSoup(html, "lxml")
+    paras = [p.get_text(strip=True) for p in soup.select(css)[:2]]
+    joined = " ".join(paras)
+    return joined[:max_len] if joined else ""
+    
 # --------------------------------------------------------
 # 3. 财新网首页要闻 → 正文首段
 # --------------------------------------------------------
@@ -100,13 +107,8 @@ try:
     soup  = BeautifulSoup(index, "lxml")
     links = [a["href"] for a in soup.select(".news_list a") if a["href"].startswith("https://")]
     for url in links[:MAX_PER_SRC]:
-        art = requests.get(url, headers=ua, timeout=10).text
-        s   = BeautifulSoup(art, "lxml")
-        title = s.title.get_text(strip=True)
-        # ---- 把首段抓失败也写入，便于调试 ----
-        para = (s.select_one("meta[name=description]") or s.find("p"))
-        snippet = para.get_text(strip=True) if para else ""
-        add(title, snippet or title, "财新网", today.isoformat(), "CN_JSON")
+    art = requests.get(url, headers=ua, timeout=10).text
+    snippet = first_paragraphs(art, "div.article p")
     print("财新网 抓到", len(links[:MAX_PER_SRC]), "条")
 except Exception as e:
     print("财新网抓取失败:", e)
@@ -121,11 +123,9 @@ try:
         timeout=10).json()
     ua = {"User-Agent": "Mozilla/5.0"}
     for it in sina_list["result"]["data"][:MAX_PER_SRC]:
-        art = requests.get(it["url"], headers=ua, timeout=10).text
-        s   = BeautifulSoup(art, "lxml")
-        para = (s.select_one("meta[name=description]") or s.find("p")).get_text(strip=True)
-        add(it["title"], para, "新浪财经", it["ctime"], "CN_JSON")
-    print("新浪财经 抓到", len(sina_list['result']['data'][:MAX_PER_SRC]), "条")
+        art = requests.get(url, headers=ua, timeout=10).text
+        snippet = first_paragraphs(art, "div.article p")
+        print("新浪财经 抓到", len(sina_list['result']['data'][:MAX_PER_SRC]), "条")
 except Exception as e:
     print("新浪财经抓取失败:", e)
 
@@ -138,7 +138,7 @@ print("NewsAPI",  sum(n['origin']=="NEWSAPI"   for n in news_items),
 
 seen, unique = set(), []
 for n in news_items:
-    key = norm(n["title"])
+    key = f"{norm(n['title'])}_{n['source']}"
     if key not in seen:
         unique.append(n); seen.add(key)
 
