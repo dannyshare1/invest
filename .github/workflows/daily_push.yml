@@ -29,5 +29,11 @@ jobs:
       - name: 抓取新闻
         run: python fetch_news.py
 
+      - name: 上传新闻 JSON 作为 Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: news-json
+          path: news.json
+
       - name: 生成并推送投资建议
         run: python daily_push_qwen.py
