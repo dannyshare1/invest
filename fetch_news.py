@@ -2,7 +2,7 @@
 """
 抓取 NewsAPI、Mediastack、东方财富 & 新浪财经官方接口 → 去重 → 保存 news.json
 """
-import os, json, datetime, re, requests
+import os, json, datetime, re, requests, time   # ← 在这里补上 time
 
 NEWSAPI_KEY    = os.getenv("NEWSAPI_KEY")      # 必填
 MEDIASTACK_KEY = os.getenv("MEDIASTACK_KEY")   # 可选
