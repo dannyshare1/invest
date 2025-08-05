@@ -53,20 +53,30 @@ if should_record:
 
 holdings_lines = "\n".join(f"- {k}：{v}" for k, v in holdings.items())
 
-# ——— 构建 Prompt ———
+import json, textwrap
+
+# 读取新闻片段
+news_snippets = ""
+if os.path.exists("news.json"):
+    with open("news.json", "r", encoding="utf-8") as nf:
+        for n in json.load(nf)[:8]:        # 取前 8 条
+            line = f"- {n['title']} ({n['source']} {n['published']})"
+            news_snippets += textwrap.shorten(line, 120, placeholder="…") + "\n"
+
+# ---------------- Prompt ----------------
 prompt = f"""
-你是一个专业的中国投资策略分析师，请根据当前投资者（C5进取型）的仓位结构和市场动态，生成一份每日投资建议：
+请先看以下参考资料，然后在全网搜索相关的报道和分析评论
+{news_snippets or '—今日抓取为空—'}
 
-📅 日期：{date_str}（周{weekday}）
-
-📊 当前持仓比例：
+再结合投资者（C5进取型）当前仓位：
 {holdings_lines}
 
-📌 请你提供以下内容（总字数控制在500字以内）：
-1. 前一交易日的重点市场新闻摘要，覆盖当前持仓相关行业（如红利、高股息、半导体、蓝筹、债券、大消费、大宗商品等）。
-2. 针对上述仓位，提供专业、简洁的操作建议（如维持、加仓、减仓、调仓等）。
-3. 可选项：如当前市场适合进行定投，请明确指出，并说明建议的定投标的和理由；如某类资产存在阶段性高位或风险，也请提示止盈策略。
+要求有独特的观点，而且剖析很深刻：
+1. 选出最重要的 6 条信息（中英文至少各 2 条），合并同义条目，每条括号注明媒体与日期；
+2. 逐项说明对当前持仓的影响，并给出操作建议（维持/加仓/减仓/定投/止盈）；
+3. 如定投或止盈时机明确，请用「✅ 建议」或「⚠️ 风险」高亮。
 """
+
 
 # ——— 手动重试调用通义千问 API ———
 api_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
