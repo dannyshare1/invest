@@ -103,8 +103,10 @@ try:
         art = requests.get(url, headers=ua, timeout=10).text
         s   = BeautifulSoup(art, "lxml")
         title = s.title.get_text(strip=True)
-        para  = (s.select_one("meta[name=description]") or s.find("p")).get_text(strip=True)
-        add(title, para, "财新网", today.isoformat(), "CN_JSON")
+        # ---- 把首段抓失败也写入，便于调试 ----
+        para = (s.select_one("meta[name=description]") or s.find("p"))
+        snippet = para.get_text(strip=True) if para else ""
+        add(title, snippet or title, "财新网", today.isoformat(), "CN_JSON")
     print("财新网 抓到", len(links[:MAX_PER_SRC]), "条")
 except Exception as e:
     print("财新网抓取失败:", e)
