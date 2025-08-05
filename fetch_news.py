@@ -83,11 +83,15 @@ if MEDIASTACK_KEY:
 # 3. 东方财富官方接口（要闻）
 # ------------------------------------------------------------------
 try:
+    em_hdr = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.eastmoney.com/"}
     em_url = "https://push2.eastmoney.com/api/qt/top_news"
     em_params = {"type": "finance", "limit": 20, "_": int(time.time()*1000)}
-    em = requests.get(em_url, params=em_params, timeout=10).json()
-    for it in em["data"]["list"][:MAX_PER_SRC]:
-        add(it["title"], "东方财富", it["url"], it["date"], "RSS")
+    r = requests.get(em_url, params=em_params, headers=em_hdr, timeout=10)
+    if r.headers.get("Content-Type","").startswith("application/json"):
+        for it in r.json()["data"]["list"][:MAX_PER_SRC]:
+            add(it["title"], "东方财富", it["url"], it["date"], "CN_JSON")
+    else:
+        print("东方财富返回非 JSON，跳过")
 except Exception as e:
     print("东方财富抓取失败：", e)
 
