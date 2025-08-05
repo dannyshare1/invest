@@ -1,148 +1,105 @@
 # -*- coding: utf-8 -*-
 """
-NewsAPI + Mediastack + 财新(官方JSON) + 新浪财经(官方JSON) → news.json（含摘要）
+Reuters · Yahoo Finance · FT  +  中国证券报 · 新华社财经 · 21财经 · 上证报
+→ 汇总为 news.json（含 200-300 字摘要）
+依赖：requests beautifulsoup4 lxml chardet
 """
-import os, json, datetime, hashlib, re, html as ihtml, requests, chardet, traceback
+import os, json, datetime, re, hashlib, html as ihtml, requests, chardet
 from bs4 import BeautifulSoup
-from sumy.parsers.plaintext import PlaintextParser
-from sumy.summarizers.text_rank import TextRankSummarizer
-from sumy.nlp.tokenizers import Tokenizer
 
-# ========== 基础设置 ==========
-NEWS_KEY  = os.getenv("NEWSAPI_KEY")
-MS_KEY    = os.getenv("MEDIASTACK_KEY")
-MAX_EACH  = 10          # 每源最多条数
-TIMEOUT   = 10
+# -------- 全局参数 -------- #
+MAX_PER_SRC = 10          # 每源最多保留
+TIMEOUT     = 12
+ua_hdr      = {"User-Agent": "Mozilla/5.0"}
 
-today  = datetime.date.today()
-yest   = today - datetime.timedelta(days=1)
-ua_hdr = {"User-Agent": "Mozilla/5.0"}
+today = datetime.date.today()
 
-# 关键词（≥2 字／字母）
-INV_KWS = [w.lower() for w in
-  "股市 股票 指数 证券 融资 分红 回购 半导体 芯片 AI 宏观 业绩 盈利 通胀 利率 bull bear dividend buyback earnings volatility semiconductor inflation".split()]
-
-def is_relevant(txt: str) -> bool:
-    txt = re.sub(r"[^\w\u4e00-\u9fa5]", "", txt.lower())
-    return any(k in txt for k in INV_KWS)
-
-# ========== 通用摘要 ==========
-def clean_html(h: str) -> str:
-    soup = BeautifulSoup(h, "lxml")
-    for t in soup(["script", "style", "aside", "footer"]):
-        t.decompose()
-    return soup.get_text(" ", strip=True)
-
-def snippet(h: str, css: str, cap: int = 300) -> str:
-    s  = BeautifulSoup(h, "lxml")
-    seg = [p.get_text(" ", strip=True) for p in s.select(css)[:3]]
-    base = " ".join(seg) or clean_html(h)[:cap]
-    # TextRank 再压一句
-    pt  = PlaintextParser.from_string(base, Tokenizer("chinese"))
-    tex = TextRankSummarizer()(pt.document, 1)
-    full = (base + " " + " ".join(map(str, tex)))[:cap]
-    return ihtml.unescape(full)
-
+# —— 实用函数 —— #
 def tidy(resp: requests.Response) -> str:
     if resp.encoding == "ISO-8859-1":
         resp.encoding = chardet.detect(resp.content)["encoding"] or "utf-8"
     return resp.text
 
-def sha(title: str, date: str) -> str:
-    return hashlib.md5(f"{title}_{date}".encode()).hexdigest()
+def first_paras(html: str, css: str, n: int = 3, cap: int = 300) -> str:
+    soup = BeautifulSoup(html, "lxml")
+    paras = [p.get_text(" ", strip=True) for p in soup.select(css)[:n]]
+    txt = " ".join(paras) or soup.get_text(" ", strip=True)
+    return ihtml.unescape(txt)[:cap]
 
-items = []
+def norm(txt: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fa5]", "", txt).lower()
 
-def add(title, desc, src, date, origin):
-    if not title or not desc or len(desc) < 30:
+# 关键词（长度 >1）
+INV_KWS = [w.lower() for w in """
+股票 股市 指数 证券 分红 回购 半导体 芯片 AI 宏观 业绩 盈利
+bull bear dividend buyback earnings volatility yield inflation
+""".split() if len(w) > 1]
+
+def related(t: str) -> bool:
+    txt = norm(t)
+    return any(k in txt for k in INV_KWS)
+
+# —— 汇总容器 —— #
+items, seen = [], set()
+def add(title, snippet, src, date, origin):
+    if not title or len(snippet) < 30 or not related(title + snippet):
         return
-    if not is_relevant(title + desc):
-        return
+    key = hashlib.md5(f"{title}_{date}".encode()).hexdigest()
+    if key in seen: return
+    seen.add(key)
     items.append({
-        "id": sha(title, date),
-        "title": title.strip(),
-        "snippet": desc.strip(),
-        "source": src,
+        "title":   title.strip(),
+        "snippet": snippet.strip(),
+        "source":  src,
         "published": date[:10],
-        "origin": origin
+        "origin":  origin
     })
 
-# ========== 1. NewsAPI ==========
-dom_whitelist = ",".join([
-    "bloomberg.com","reuters.com","ft.com","wsj.com",
-    "cnbc.com","marketwatch.com","finance.yahoo.com","seekingalpha.com"
-])
-if NEWS_KEY:
-    for q in ["stock market", "earnings", "dividend", "china chip"]:
-        r = requests.get("https://newsapi.org/v2/everything",
-                         params={
-                             "q": q, "language": "en",
-                             "from": yest, "to": today,
-                             "pageSize": MAX_EACH, "domains": dom_whitelist,
-                             "sortBy": "publishedAt", "apiKey": NEWS_KEY
-                         }, timeout=TIMEOUT)
-        if r.status_code == 429:
-            print("NewsAPI hit daily limit, skip")
-            break
-        for art in r.json().get("articles", []):
-            add(art["title"], art.get("description") or art["title"],
-                art["source"]["name"], art["publishedAt"], "NEWSAPI")
+# -------- A. 国际财经 RSS -------- #
+RSS_INTL = [
+    ("Reuters", "https://feeds.reuters.com/reuters/businessNews"),
+    ("YahooFinance", "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US"),
+    ("FT", "https://www.ft.com/?format=rss")
+]
 
-# ========== 2. Mediastack ==========
-if MS_KEY:
-    for q in ["股市", "分红", "半导体", "宏观经济"]:
-        r = requests.get("http://api.mediastack.com/v1/news",
-                         params={
-                             "access_key": MS_KEY, "keywords": q,
-                             "languages": "en,zh",
-                             "domains": dom_whitelist,
-                             "date": yest, "limit": MAX_EACH
-                         }, timeout=TIMEOUT)
-        if r.status_code != 200:
-            print("Mediastack error:", r.text); continue
-        for art in r.json().get("data", []):
-            add(art["title"], art.get("description") or art["title"],
-                art["source"], art["published_at"], "MEDIASTACK")
+for src, url in RSS_INTL:
+    try:
+        xml = requests.get(url, headers=ua_hdr, timeout=TIMEOUT).text
+        for itm in BeautifulSoup(xml, "xml").find_all("item")[:MAX_PER_SRC]:
+            title = itm.title.get_text(strip=True)
+            link  = itm.link.get_text(strip=True)
+            desc  = BeautifulSoup(itm.description.get_text(), "lxml").get_text(" ", strip=True)
+            add(title, desc, src, today.isoformat(), "INT_RSS")
+    except Exception as e:
+        print(src, "RSS error:", e)
 
-# ========== 3. 财新官方 JSON ==========
-try:
-    j = requests.get("https://datanews.caixin.com/m/api/headline?limit=20",
-                     headers=ua_hdr, timeout=TIMEOUT).json()
-    cnt = 0
-    for art in j.get("data", [])[:MAX_EACH]:
-        link = art["url"]
-        cont = requests.get(link, headers=ua_hdr, timeout=TIMEOUT)
-        desc = snippet(tidy(cont), "article p, div.article p")
-        add(art["title"], desc, "财新网", art["time"], "CN_JSON")
-        cnt += 1
-    print("Caixin JSON:", cnt)
-except Exception:
-    print("Caixin JSON failed:", traceback.format_exc()[:200])
+# -------- B. 国内财经 JSON / RSS -------- #
+RSS_CN = [
+    # 中国证券报快讯
+    ("中国证券报", "https://rsshub.app/cs/news"),
+    # 新华社财经
+    ("新华社财经", "https://rsshub.app/xinhua/finance"),
+    # 21财经滚动
+    ("21世纪经济报道", "https://rsshub.app/21jingji/rolling"),
+    # 上海证券报要闻
+    ("上海证券报", "https://rsshub.app/stcn/kuaixun")
+]
 
-# ========== 4. 新浪财经 JSON ==========
-try:
-    j = requests.get("https://feed.sina.com.cn/api/roll/get",
-                     params={"pageid":155, "lid":1686, "num":40},
-                     timeout=TIMEOUT).json()
-    cnt = 0
-    for art in j["result"]["data"]:
-        if cnt >= MAX_EACH: break
-        link = art["url"]
-        if not link.startswith("https://finance.sina.com.cn/"): continue
-        page = requests.get(link, headers=ua_hdr, timeout=TIMEOUT)
-        desc = snippet(tidy(page), "article p, div.article p, p")
-        add(art["title"], desc, "新浪财经", art["ctime"], "CN_JSON")
-        cnt += 1
-    print("Sina JSON:", cnt)
-except Exception:
-    print("Sina JSON failed:", traceback.format_exc()[:200])
+for src, url in RSS_CN:
+    try:
+        xml = requests.get(url, headers=ua_hdr, timeout=TIMEOUT).text
+        for itm in BeautifulSoup(xml, "xml").find_all("item")[:MAX_PER_SRC]:
+            title = itm.title.get_text(strip=True)
+            link  = itm.link.get_text(strip=True)
+            # 抓正文首段
+            art = tidy(requests.get(link, headers=ua_hdr, timeout=TIMEOUT))
+            snp = first_paras(art, "article p, div.article p, p")
+            add(title, snp, src, today.isoformat(), "CN_RSS")
+    except Exception as e:
+        print(src, "RSS error:", e)
 
-# ========== 去重 & 保存 ==========
-uniq = {x["id"]: x for x in items}.values()
+# -------- C. 保存 -------- #
 with open("news.json", "w", encoding="utf-8") as f:
-    json.dump(list(uniq), f, ensure_ascii=False, indent=2)
+    json.dump(items, f, ensure_ascii=False, indent=2)
 
-print(f"✅ NewsAPI {sum(i['origin']=='NEWSAPI' for i in items)}, "
-      f"MStack {sum(i['origin']=='MEDIASTACK' for i in items)}, "
-      f"CN_JSON {sum(i['origin']=='CN_JSON' for i in items)} → "
-      f"保留 {len(uniq)} 条")
+print(f"✅ 输出 {len(items)} 条 → news.json")
