@@ -1,5 +1,7 @@
 name: 每日投资建议
 
+pip install requests pyyaml feedparser beautifulsoup4 lxml
+
 on:
   schedule:
     - cron: '50 23 * * *'     # UTC 23:50 = 北京 07:50
