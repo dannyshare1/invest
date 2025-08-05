@@ -4,6 +4,9 @@
 """
 import os, json, datetime, re, requests, time
 from bs4 import BeautifulSoup
+from sumy.parsers.plaintext import PlaintextParser
+from sumy.summarizers.text_rank import TextRankSummarizer
+from sumy.nlp.tokenizers import Tokenizer
 
 NEWSAPI_KEY    = os.getenv("NEWSAPI_KEY")
 MEDIASTACK_KEY = os.getenv("MEDIASTACK_KEY")
@@ -41,7 +44,19 @@ def add(title, snippet, src, pub, origin):
             "published": pub[:10],
             "origin": origin
         })
-
+        
+def textrank_snippet(raw_html, max_len=180):
+    soup = BeautifulSoup(raw_html, "lxml")
+    # 删除无关标签
+    for tag in soup(["script", "style", "aside"]):
+        tag.decompose()
+    # 仅正文 <p>
+    body = "\n".join(p.get_text() for p in soup.select("article p"))
+    parser = PlaintextParser.from_string(body, Tokenizer("chinese"))
+    summary = TextRankSummarizer()(parser.document, 3)   # 取 3 句
+    text = " ".join(map(str, summary)) or body[:max_len]
+    return text[:max_len]
+    
 # --------------------------------------------------------
 # 1. NewsAPI (英文，白名单域)
 # --------------------------------------------------------
@@ -106,10 +121,15 @@ try:
     index = requests.get("https://www.caixin.com/", headers=ua, timeout=10).text
     soup  = BeautifulSoup(index, "lxml")
     links = [a["href"] for a in soup.select(".news_list a") if a["href"].startswith("https://")]
-    for url in links[:MAX_PER_SRC]:
-    art = requests.get(url, headers=ua, timeout=10).text
-    snippet = first_paragraphs(art, "div.article p")
-    print("财新网 抓到", len(links[:MAX_PER_SRC]), "条")
+count = 0
+for url in links[:MAX_PER_SRC]:
+    html = requests.get(url, headers=ua, timeout=10).text
+    soup_art = BeautifulSoup(html, "lxml")
+    title = soup_art.title.get_text(strip=True)
+    snippet = textrank_snippet(html)
+    add(title, snippet, "财新网", today.isoformat(), "CN_JSON")
+    count += 1
+print("财新网 抓到", count, "条")
 except Exception as e:
     print("财新网抓取失败:", e)
 
@@ -122,10 +142,14 @@ try:
         params={"pageid":155, "lid":1686, "num":20},
         timeout=10).json()
     ua = {"User-Agent": "Mozilla/5.0"}
-    for it in sina_list["result"]["data"][:MAX_PER_SRC]:
-        art = requests.get(url, headers=ua, timeout=10).text
-        snippet = first_paragraphs(art, "div.article p")
-        print("新浪财经 抓到", len(sina_list['result']['data'][:MAX_PER_SRC]), "条")
+count = 0
+for it in sina_list["result"]["data"][:MAX_PER_SRC]:
+    html = requests.get(it["url"], headers=ua, timeout=10).text
+    snippet = textrank_snippet(html)
+    add(it["title"], snippet, "新浪财经", it["ctime"], "CN_JSON")
+    count += 1
+print("新浪财经 抓到", count, "条")
+
 except Exception as e:
     print("新浪财经抓取失败:", e)
 
