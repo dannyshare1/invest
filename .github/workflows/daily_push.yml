@@ -26,8 +26,7 @@ jobs:
         run: |
           pip install requests pyyaml feedparser
           pip install requests pyyaml feedparser beautifulsoup4 lxml
-          pip install requests beautifulsoup4 lxml sumy
-          pip install requests beautifulsoup4 lxml chardet
+          pip install requests beautifulsoup4 lxml chardet sumy
 
       - name: 抓取新闻
         run: python fetch_news.py
