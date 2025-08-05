@@ -1,69 +1,49 @@
-import os
-import yaml
-import requests
-import time
+import os, time, json, yaml, requests, textwrap
 from datetime import datetime
-from zoneinfo import ZoneInfo   # Python 3.9+ 环境
+from zoneinfo import ZoneInfo
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ——— 环境变量 ———
-SCKEY = os.getenv("SCKEY")
-QWEN_API_KEY = os.getenv("QWEN_API_KEY")
-if not SCKEY:
-    raise ValueError("❌ 缺少 Server 酱密钥 SCKEY")
-if not QWEN_API_KEY:
-    raise ValueError("❌ 缺少通义千问 API 密钥 QWEN_API_KEY")
+SCKEY  = os.getenv("SCKEY")
+APIKEY = os.getenv("QWEN_API_KEY")
+if not SCKEY or not APIKEY:
+    raise ValueError("缺少 SCKEY 或 QWEN_API_KEY")
 
-# ——— 带状态码重试的 Session ———
+# ——— 带重试 Session ———
 session = requests.Session()
-retries = Retry(
-    total=0  # 我们采用手动重试，所以这里设 0
-)
-adapter = HTTPAdapter(max_retries=retries)
-session.mount("https://", adapter)
-session.mount("http://", adapter)
+session.mount("https://", HTTPAdapter(max_retries=Retry(total=0)))
 
-# ——— 获取北京时间 ———
+# ——— 北京时间 ———
 bj_now = datetime.now(ZoneInfo("Asia/Shanghai"))
-today = bj_now.date()
-date_str = today.strftime("%Y年%m月%d日")
-weekday = "一二三四五六日"[bj_now.weekday()]
+today   = bj_now.date()
+date_str, weekday = bj_now.strftime("%Y年%m月%d日"), "一二三四五六日"[bj_now.weekday()]
 title = f"📈 每日投资建议 · {date_str}"
 
-# ——— 读取并校验 holdings.yaml ———
+# ——— 读取持仓 & 校验 ———
 with open("holdings.yaml", "r", encoding="utf-8") as f:
     holdings = yaml.safe_load(f)
+if round(sum(float(v.strip('%')) for v in holdings.values())) != 100:
+    raise ValueError("持仓总和≠100%")
 
-total_pct = sum(float(v.strip("%")) for v in holdings.values())
-if round(total_pct) != 100:
-    raise ValueError(f"❌ 仓位总和为 {total_pct}%，应为 100%。请检查 holdings.yaml。")
-
-# ——— 仓位变动检测 & 记录 ———
-last_path = "last_holdings.yaml"
-should_record = True
+# —— 仓位变动记录 ——（同之前，省略详情）
+last_path, should_record = "last_holdings.yaml", True
 if os.path.exists(last_path):
-    with open(last_path, "r", encoding="utf-8") as f:
-        last_holdings = yaml.safe_load(f)
-    should_record = (holdings != last_holdings)
-
+    should_record = holdings != yaml.safe_load(open(last_path, encoding="utf-8"))
 if should_record:
-    with open(last_path, "w", encoding="utf-8") as f:
-        yaml.dump(holdings, f, allow_unicode=True)
+    yaml.dump(holdings, open(last_path,"w",encoding="utf-8"), allow_unicode=True)
 
-holdings_lines = "\n".join(f"- {k}：{v}" for k, v in holdings.items())
+holdings_lines = "\n".join(f"- {k}：{v}" for k,v in holdings.items())
 
-import json, textwrap
-
-# 读取新闻片段
+# —— 读取 news.json ——
 news_snippets = ""
 if os.path.exists("news.json"):
-    with open("news.json", "r", encoding="utf-8") as nf:
-        for n in json.load(nf)[:8]:        # 取前 8 条
+    with open("news.json","r",encoding="utf-8") as nf:
+        for n in json.load(nf)[:8]:
             line = f"- {n['title']} ({n['source']} {n['published']})"
             news_snippets += textwrap.shorten(line, 120, placeholder="…") + "\n"
 
-# ---------------- Prompt ----------------
+# —— Prompt ——
 prompt = f"""
 请先看以下参考资料，然后在全网搜索相关的报道和分析评论
 {news_snippets or '—今日抓取为空—'}
@@ -77,61 +57,47 @@ prompt = f"""
 3. 如定投或止盈时机明确，请用「✅ 建议」或「⚠️ 风险」高亮。
 """
 
-
-# ——— 手动重试调用通义千问 API ———
-api_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+# —— 调用通义千问（4 次重试，读超时 90s） ——
 payload = {
-    "model": "qwen-max",  # 或 "qwen-plus"
+    "model": "qwen-max",
     "input": {"prompt": prompt},
     "parameters": {"result_format": "message"},
-    "workspace": "ilm-c9d12em00wxjtstn"  # 替换为你的 workspace ID
+    "workspace": "ilm-c9d12em00wxjtstn"
 }
-
-for attempt in range(3):
+for i in range(4):
     try:
-        resp = session.post(
-            api_url,
+        r = session.post(
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {QWEN_API_KEY}"
+                "Authorization": f"Bearer {APIKEY}"
             },
             json=payload,
-            timeout=(10, 60)  # 连接超时10s，读超时60s
+            timeout=(10, 90)
         )
-        resp.raise_for_status()
+        r.raise_for_status()
         break
     except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-        print(f"⚠️ 第 {attempt+1} 次调用通义千问失败：{e}")
-        if attempt < 2:
-            time.sleep(2 ** attempt)  # 2s、4s 后重试
-            continue
-        else:
-            raise
+        print(f"⚠️ 第 {i+1} 次调用失败：{e}")
+        if i == 3: raise
+        time.sleep(2**i)
 
-qwen_reply = resp.json()["output"]["choices"][0]["message"]["content"].strip()
+content = r.json()["output"]["choices"][0]["message"]["content"].strip()
 
-# ——— 推送到 Server 酱 ———
-sck_url = f"https://sctapi.ftqq.com/{SCKEY}.send"
-sck_res = session.post(sck_url, data={"title": title, "desp": qwen_reply}, timeout=10)
-print("✅ Server 酱 推送：", sck_res.status_code, sck_res.text)
+# —— Server 酱推送 ——
+session.post(f"https://sctapi.ftqq.com/{SCKEY}.send",
+             data={"title": title, "desp": content}, timeout=10)
 
-# ——— 写入日志 ———
-logs_dir = "logs"
-os.makedirs(logs_dir, exist_ok=True)
-log_file = os.path.join(logs_dir, today.isoformat() + ".md")
-with open(log_file, "w", encoding="utf-8") as f:
-    f.write(f"# {title}\n\n{qwen_reply}\n\n")
-    f.write("📌 仓位已变动，已记录持仓。\n" if should_record else "📌 仓位未变动，无需记录。\n")
+# —— Telegram 推送（可选） ——
+TG_TOKEN, TG_CHAT = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+if TG_TOKEN and TG_CHAT:
+    session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                 json={"chat_id": TG_CHAT, "text": f"{title}\n\n{content}", "parse_mode": "Markdown"},
+                 timeout=10)
 
-# ——— 推送到 Telegram ———
-tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
-tg_chat  = os.getenv("TELEGRAM_CHAT_ID")
-if tg_token and tg_chat:
-    tg_url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
-    tg_payload = {
-        "chat_id": tg_chat,
-        "text": f"{title}\n\n{qwen_reply}",
-        "parse_mode": "Markdown"
-    }
-    tg_res = session.post(tg_url, json=tg_payload, timeout=10)
-    print("✅ Telegram 推送：", tg_res.status_code, tg_res.text)
+# —— 日志记录 ——
+os.makedirs("logs", exist_ok=True)
+with open(f"logs/{today.isoformat()}.md","w",encoding="utf-8") as f:
+    f.write(f"# {title}\n\n{content}\n\n")
+    f.write("📌 持仓变动已记录。\n" if should_record else "📌 持仓未变动。\n")
+print("✅ 推送完成")
