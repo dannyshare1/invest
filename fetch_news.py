@@ -123,9 +123,12 @@ try:
     links = [a["href"] for a in soup.select(".news_list a") if a["href"].startswith("https://")]
     count = 0
     for url in links[:MAX_PER_SRC]:
-        html  = requests.get(url, headers=ua, timeout=10).text
-        title = BeautifulSoup(html, "lxml").title.get_text(strip=True)
+        html = requests.get(it["url"], headers=ua, timeout=10)
+        html.encoding = html.apparent_encoding   # ★ 识别实际编码，再 .text
         snippet = first_paragraphs(html, "div.article p")
+        txt = (title + snippet).lower()
+        if not any(k.lower() in txt for k in INV_KWS):
+            continue
         add(title, snippet, "财新网", today.isoformat(), "CN_JSON")
         count += 1
     print("财新网 抓到", count, "条")
@@ -141,17 +144,32 @@ try:
         "https://feed.sina.com.cn/api/roll/get",
         params={"pageid": 155, "lid": 1686, "num": 20},
         timeout=10).json()
+
     ua = {"User-Agent": "Mozilla/5.0"}
+    INV_KWS = [
+        "股", "券", "市", "指数", "融资", "分红",
+        "半导体", "AI", "宏观", "业绩", "回购",
+        "bull", "bear", "dividend", "earnings", "volatility"
+    ]
+
     count = 0
     for it in sina_list["result"]["data"][:MAX_PER_SRC]:
-        html = requests.get(it["url"], headers=ua, timeout=10).text
-        snippet = first_paragraphs(html, "div.article-content p")
+        # ---- 取正文首段 ----
+        html = requests.get(it["url"], headers=ua, timeout=10)
+        html.encoding = html.apparent_encoding          # 防止中文乱码
+        snippet = first_paragraphs(html.text, "div.article-content p")
+
+        # ---- 关键词过滤 ----
+        txt = (it["title"] + snippet).lower()
+        if not any(k.lower() in txt for k in INV_KWS):
+            continue          # 跳过与投资无关的地方新闻
+
         add(it["title"], snippet, "新浪财经", it["ctime"], "CN_JSON")
         count += 1
+
     print("新浪财经 抓到", count, "条")
 except Exception as e:
     print("新浪财经抓取失败:", e)
-
 
 # --------------------------------------------------------
 # 统计 + 去重
