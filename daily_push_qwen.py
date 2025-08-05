@@ -57,31 +57,37 @@ prompt = f"""
 3. 如定投或止盈时机明确，请用「✅ 建议」或「⚠️ 风险」高亮。
 """
 
-# —— 调用通义千问（4 次重试，读超时 90s） ——
-payload = {
-    "model": "qwen-max",
-    "input": {"prompt": prompt},
-    "parameters": {"result_format": "message"},
-    "workspace": "ilm-c9d12em00wxjtstn"
+# ——— 自动降级：先试 qwen-max，超时就退到 qwen-plus ———
+api_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+hdrs = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {APIKEY}"
 }
-for i in range(4):
-    try:
-        r = session.post(
-            "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {APIKEY}"
-            },
-            json=payload,
-            timeout=(10, 90)
-        )
-        r.raise_for_status()
-        break
-    except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-        print(f"⚠️ 第 {i+1} 次调用失败：{e}")
-        if i == 3: raise
-        time.sleep(2**i)
 
+MODELS = ["qwen-max", "qwen-plus"]          # 依次尝试
+response_ok = False
+
+for model in MODELS:
+    payload["model"] = model
+    for i in range(3):                       # 每个模型试 3 次
+        try:
+            print(f"→ 调用 {model} 第 {i+1}/3 次")
+            r = session.post(api_url, headers=hdrs, json=payload,
+                             timeout=(10, 90))           # 连接10s/读取90s
+            r.raise_for_status()
+            response_ok = True
+            break                                  # 成功跳出重试
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as e:
+            print(f"⚠️  {model} 第 {i+1} 次失败：{e}")
+            time.sleep(2 ** i)                     # 2s 4s 8s 回退
+    if response_ok:
+        break                                      # 已成功，停止换模型
+
+if not response_ok:
+    raise RuntimeError("❌ qwen-max 与 qwen-plus 均超时，放弃本次推送")
+
+# 解析结果
 content = r.json()["output"]["choices"][0]["message"]["content"].strip()
 
 # —— Server 酱推送 ——
