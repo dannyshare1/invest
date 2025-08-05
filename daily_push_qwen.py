@@ -57,38 +57,49 @@ prompt = f"""
 3. 如定投或止盈时机明确，请用「✅ 建议」或「⚠️ 风险」高亮。
 """
 
-# ——— 自动降级：先试 qwen-max，超时就退到 qwen-plus ———
+# ---------- 通义千问调用：先试 MAX，再降级 PLUS ----------
 api_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-hdrs = {
+headers = {
     "Content-Type": "application/json",
     "Authorization": f"Bearer {APIKEY}"
 }
 
-MODELS = ["qwen-max", "qwen-plus"]          # 依次尝试
+# 先准备 payload（除了 model 先留空，稍后循环里填）
+payload = {
+    "input": {"prompt": prompt},
+    "parameters": {"result_format": "message"},
+    "workspace": "ilm-c9d12em00wxjtstn"   # ← 换成你的 workspace
+}
+
+models = ["qwen-max", "qwen-plus"]        # 按顺序尝试
 response_ok = False
 
-for model in MODELS:
-    payload["model"] = model
-    for i in range(3):                       # 每个模型试 3 次
+for m in models:
+    payload["model"] = m
+    for i in range(3):                    # 每模型最多 3 次
         try:
-            print(f"→ 调用 {model} 第 {i+1}/3 次")
-            r = session.post(api_url, headers=hdrs, json=payload,
-                             timeout=(10, 90))           # 连接10s/读取90s
-            r.raise_for_status()
+            print(f"→ 调用 {m} 第 {i+1}/3 次")
+            resp = requests.post(api_url,
+                                 headers=headers,
+                                 json=payload,
+                                 timeout=(10, 90))   # 连接10s / 读取90s
+            resp.raise_for_status()
             response_ok = True
-            break                                  # 成功跳出重试
+            break
         except (requests.exceptions.Timeout,
                 requests.exceptions.ConnectionError) as e:
-            print(f"⚠️  {model} 第 {i+1} 次失败：{e}")
-            time.sleep(2 ** i)                     # 2s 4s 8s 回退
+            print(f"⚠️ {m} 第 {i+1} 次失败：{e}")
+            if i < 2:
+                time.sleep(2 ** i)        # 2s → 4s → 8s
     if response_ok:
-        break                                      # 已成功，停止换模型
+        break
 
 if not response_ok:
     raise RuntimeError("❌ qwen-max 与 qwen-plus 均超时，放弃本次推送")
 
-# 解析结果
-content = r.json()["output"]["choices"][0]["message"]["content"].strip()
+content = resp.json()["output"]["choices"][0]["message"]["content"].strip()
+# ---------- 后面继续：Server 酱 / Telegram 推送、日志保存 ----------
+
 
 # —— Server 酱推送 ——
 session.post(f"https://sctapi.ftqq.com/{SCKEY}.send",
