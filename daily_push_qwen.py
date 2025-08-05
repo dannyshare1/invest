@@ -40,7 +40,7 @@ if os.path.exists("news.json"):
     with open("news.json", "r", encoding="utf-8") as nf:
         for n in json.load(nf)[:8]:
             line = f"- {n['title']}：{n['snippet']} ({n['source']} {n['published']})"
-            news_snippets += textwrap.shorten(line, 120, placeholder="…") + "\n"
+            news_snippets += textwrap.shorten(line, 220, placeholder="…") + "\n"
 
 # ——— Prompt ———
 prompt = f"""
