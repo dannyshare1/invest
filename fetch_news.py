@@ -1,125 +1,142 @@
 # -*- coding: utf-8 -*-
 """
-抓取 NewsAPI、Mediastack、东方财富 & 新浪财经官方接口 → 去重 → 保存 news.json
+抓取 NewsAPI、Mediastack、财新网、新浪财经  → 去重 → news.json（含摘要）
 """
-import os, json, datetime, re, requests, time   # ← 在这里补上 time
+import os, json, datetime, re, requests, time
+from bs4 import BeautifulSoup
 
-NEWSAPI_KEY    = os.getenv("NEWSAPI_KEY")      # 必填
-MEDIASTACK_KEY = os.getenv("MEDIASTACK_KEY")   # 可选
-MAX_PER_SRC    = 5                             # 每源最多保留多少条
+NEWSAPI_KEY    = os.getenv("NEWSAPI_KEY")
+MEDIASTACK_KEY = os.getenv("MEDIASTACK_KEY")
+MAX_PER_SRC    = 5
 
-# 关键词（英/中）
+# 关键词
 keywords_en = [
-    "dividend", "high yield", "semiconductor",
-    "CSI 300", "China A-shares", "AI chip",
-    "interest rate", "inflation", "crude oil", "gold ETF"
+    "stock market", "equity", "capital market",
+    "bull market", "bear market", "volatility",
+    "dividend", "buyback", "earnings report",
+    "sector analysis", "analyst rating",
+    "interest rate impact stock"
 ]
 keywords_cn = [
-    "红利", "高股息", "半导体", "沪深300",
-    "国企分红", "人工智能", "油价", "黄金", "汇率"
+    "股市", "股票", "证券市场", "资本市场",
+    "牛市", "熊市", "波动率",
+    "分红", "回购", "财报",
+    "行业分析", "机构评级",
+    "上证综指", "深证成指", "创业板"
 ]
+combo_kw = ["公司 财报", "宏观经济 股市", "利率 影响 股票", "行业 前景"]
 
-today      = datetime.date.today()
-yesterday  = today - datetime.timedelta(days=1)
-
+today     = datetime.date.today()
+yesterday = today - datetime.timedelta(days=1)
 news_items = []
 
-def norm(txt: str):
-    """规范化标题用于去重"""
-    return re.sub(r"[^\w\u4e00-\u9fa5]", "", txt).lower()
+def norm(text): return re.sub(r"[^\w\u4e00-\u9fa5]", "", text).lower()
 
-def add(title, src, url, dt, origin):
-    """写入新闻列表"""
-    if title and url:
+def add(title, snippet, src, pub, origin):
+    if title and snippet:
         news_items.append({
             "title": title.strip(),
+            "snippet": snippet.strip()[:120],
             "source": src,
-            "url": url,
-            "published": (dt or today.isoformat())[:10],
+            "published": pub[:10],
             "origin": origin
         })
 
-# ------------------------------------------------------------------
-# 1. NewsAPI (英文)
-# ------------------------------------------------------------------
+# --------------------------------------------------------
+# 1. NewsAPI (英文，白名单域)
+# --------------------------------------------------------
+domains_white = ",".join([
+    "bloomberg.com","reuters.com","ft.com","wsj.com",
+    "cnbc.com","marketwatch.com","finance.yahoo.com","seekingalpha.com"
+])
 if NEWSAPI_KEY:
-    for kw in keywords_en:
-        r = requests.get(
-            "https://newsapi.org/v2/everything",
+    for kw in keywords_en + combo_kw:
+        r = requests.get("https://newsapi.org/v2/everything",
             params={
                 "q": kw,
                 "language": "en",
-                "from":   yesterday.isoformat(),
-                "to":     today.isoformat(),
+                "from": yesterday.isoformat(),
+                "to":   today.isoformat(),
                 "pageSize": MAX_PER_SRC,
                 "sortBy": "publishedAt",
+                "domains": domains_white,
                 "apiKey": NEWSAPI_KEY
-            },
-            timeout=10)
+            }, timeout=10)
         for art in r.json().get("articles", []):
-            add(art["title"], art["source"]["name"], art["url"],
-                art["publishedAt"], "NEWSAPI")
+            add(art["title"],
+                art.get("description") or art["title"],
+                art["source"]["name"],
+                art["publishedAt"],
+                "NEWSAPI")
 
-# ------------------------------------------------------------------
-# 2. Mediastack (可选)
-# ------------------------------------------------------------------
+# --------------------------------------------------------
+# 2. Mediastack (英文/中文)  同样白名单
+# --------------------------------------------------------
 if MEDIASTACK_KEY:
-    for kw in keywords_en + keywords_cn:
-        r = requests.get(
-            "http://api.mediastack.com/v1/news",
+    doms = domains_white
+    for kw in keywords_en + keywords_cn + combo_kw:
+        r = requests.get("http://api.mediastack.com/v1/news",
             params={
                 "access_key": MEDIASTACK_KEY,
                 "keywords": kw,
                 "languages": "en,zh",
+                "domains": doms,
                 "date": yesterday.isoformat(),
                 "limit": MAX_PER_SRC
-            },
-            timeout=10)
+            }, timeout=10)
         for art in r.json().get("data", []):
-            add(art["title"], art["source"], art["url"],
-                art["published_at"], "MEDIASTACK")
+            add(art["title"],
+                art.get("description") or art["title"],
+                art["source"],
+                art["published_at"],
+                "MEDIASTACK")
 
-# ------------------------------------------------------------------
-# 3. 东方财富官方接口（要闻）
-# ------------------------------------------------------------------
+# --------------------------------------------------------
+# 3. 财新网首页要闻 → 正文首段
+# --------------------------------------------------------
 try:
-    em_hdr = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.eastmoney.com/"}
-    em_url = "https://push2.eastmoney.com/api/qt/top_news"
-    em_params = {"type": "finance", "limit": 20, "_": int(time.time()*1000)}
-    r = requests.get(em_url, params=em_params, headers=em_hdr, timeout=10)
-    if r.headers.get("Content-Type","").startswith("application/json"):
-        for it in r.json()["data"]["list"][:MAX_PER_SRC]:
-            add(it["title"], "东方财富", it["url"], it["date"], "CN_JSON")
-    else:
-        print("东方财富返回非 JSON，跳过")
+    ua = {"User-Agent": "Mozilla/5.0"}
+    index = requests.get("https://www.caixin.com/", headers=ua, timeout=10).text
+    soup  = BeautifulSoup(index, "lxml")
+    links = [a["href"] for a in soup.select(".news_list a") if a["href"].startswith("https://")]
+    for url in links[:MAX_PER_SRC]:
+        art = requests.get(url, headers=ua, timeout=10).text
+        s   = BeautifulSoup(art, "lxml")
+        title = s.title.get_text(strip=True)
+        para  = (s.select_one("meta[name=description]") or s.find("p")).get_text(strip=True)
+        add(title, para, "财新网", today.isoformat(), "CN_JSON")
+    print("财新网 抓到", len(links[:MAX_PER_SRC]), "条")
 except Exception as e:
-    print("东方财富抓取失败：", e)
+    print("财新网抓取失败:", e)
 
-# ------------------------------------------------------------------
-# 4. 新浪财经官方接口（焦点新闻）
-# ------------------------------------------------------------------
+# --------------------------------------------------------
+# 4. 新浪财经焦点新闻 → 正文首段
+# --------------------------------------------------------
 try:
-    sina_url = "https://feed.sina.com.cn/api/roll/get"
-    sina_params = {"pageid": 155, "lid": 1686, "num": 20}
-    s = requests.get(sina_url, params=sina_params, timeout=10).json()
-    for it in s["result"]["data"][:MAX_PER_SRC]:
-        add(it["title"], "新浪财经", it["url"], it["ctime"], "RSS")
+    sina_list = requests.get(
+        "https://feed.sina.com.cn/api/roll/get",
+        params={"pageid":155, "lid":1686, "num":20},
+        timeout=10).json()
+    ua = {"User-Agent": "Mozilla/5.0"}
+    for it in sina_list["result"]["data"][:MAX_PER_SRC]:
+        art = requests.get(it["url"], headers=ua, timeout=10).text
+        s   = BeautifulSoup(art, "lxml")
+        para = (s.select_one("meta[name=description]") or s.find("p")).get_text(strip=True)
+        add(it["title"], para, "新浪财经", it["ctime"], "CN_JSON")
+    print("新浪财经 抓到", len(sina_list['result']['data'][:MAX_PER_SRC]), "条")
 except Exception as e:
-    print("新浪财经抓取失败：", e)
+    print("新浪财经抓取失败:", e)
 
-# ------------------------------------------------------------------
-# 5. 打印抓取统计
-# ------------------------------------------------------------------
+# --------------------------------------------------------
+# 统计 + 去重
+# --------------------------------------------------------
 print("NewsAPI",  sum(n['origin']=="NEWSAPI"   for n in news_items),
       "MStack",  sum(n['origin']=="MEDIASTACK" for n in news_items),
-      "RSS",     sum(n['origin']=="RSS"        for n in news_items))
+      "CN_JSON", sum(n['origin']=="CN_JSON"    for n in news_items))
 
-# ------------------------------------------------------------------
-# 6. 去重：先 URL，再规范化标题
-# ------------------------------------------------------------------
 seen, unique = set(), []
 for n in news_items:
-    key = n["url"] or norm(n["title"])
+    key = norm(n["title"])
     if key not in seen:
         unique.append(n); seen.add(key)
 
