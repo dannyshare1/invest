@@ -1,9 +1,36 @@
-# invest-push-bot
 
-📈 每日投资建议推送机器人（使用 GitHub Actions + Server 酱 Turbo 版）
+# Daily News Fetcher
 
-## 🛠️ 使用方法
+Python scripts to fetch latest news from Caixin and Sina, extract the first paragraph as summary,
+and output a **news.json** file for downstream processing / push notifications.
 
-1. 将本项目上传到你的 GitHub 仓库中
-2. 在仓库 Settings > Secrets > Actions 中添加密钥：`SCKEY`
-3. 每天早上 08:30（北京时间）自动向你微信推送投资建议
+## Directory layout
+
+```
+.
+├── fetchers/
+│   ├── caixin_news_fetcher.py
+│   ├── sina_news_fetcher.py
+│   └── __init__.py
+├── compile_news.py
+├── requirements.txt
+└── .github/
+    └── workflows/
+        └── daily_push.yml
+```
+
+## Usage
+
+```bash
+pip install -r requirements.txt
+python compile_news.py
+```
+
+The generated `news.json` will contain fields:
+
+* `title`
+* `url`
+* `summary`
+* `source`
+* `published_at`
+* `fetched_at`
