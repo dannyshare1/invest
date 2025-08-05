@@ -30,7 +30,7 @@ jobs:
         run: python fetch_news.py
 
       - name: 上传新闻 JSON 作为 Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: news-json
           path: news.json
