@@ -27,7 +27,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install httpx python-dateutil rich openai  # 够用就行，或者 pip install -r requirements.txt
+          pip install httpx python-dateutil rich openai pyyaml requests
 
       # ① 生成并推送新闻摘要
       - name: News briefing
