@@ -51,41 +51,47 @@ def add(title, snip, src):
         "published": today.isoformat(),
     })
 
-# ---------- A. 国际 RSS ----------
-INTL_RSS = [
-    ("Reuters", "https://www.reuters.com/rssFeed/businessNews"),
-    ("YahooFinance", "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US"),
-    ("FT", "https://www.ft.com/?format=rss")
-]
-for src, url in INTL_RSS:
-    try:
-        xml = requests.get(url, headers=UA, timeout=TIMEOUT).text
-        for itm in BeautifulSoup(xml, "xml").find_all("item")[:MAX_PER]:
-            title = itm.title.get_text(strip=True)
-            desc  = BeautifulSoup(itm.description.get_text(), "lxml").get_text(" ", strip=True)
-            add(title, desc, src)
-    except Exception as e:
-        print(src, "RSS error:", e)
+# --- 仅列 3 处改动，其余保持不变 ---
 
-# ---------- B. 国内 HTML ----------
-DOMESTIC = [
-    ("中国证券报",  "https://www.cs.com.cn/xwzx/hg/"),
-    ("新华社财经",  "https://www.news.cn/fortune/"),
-    ("21财经",     "https://www.21jingji.com/list/stock"),
-    ("上海证券报",  "https://news.cnstock.com/news/")
-]
-for src, list_url in DOMESTIC:
+################ 1  Reuters via HTML JSON  ################
+re_json = "https://www.reuters.com/pf/api/v3/content/fetch/articles-by-section-alias-or-id-v1?queryParams=section=%2Fbusiness&offset=0&size=10"
+try:
+    data = requests.get(re_json, headers=UA, timeout=TIMEOUT).json()
+    for art in data["result"]["articles"][:MAX_PER]:
+        title = art["title"]
+        desc  = art.get("description") or art.get("dek", "")
+        add(title, desc, "Reuters", today.isoformat())
+except Exception as e:
+    print("Reuters JSON error:", e)
+
+############### 2  国内列表 -> 真新闻链接  ################
+def real_links(html):
+    soup = BeautifulSoup(html, "lxml")
+    return [a["href"] for a in soup.select("a[href]") 
+            if a["href"].startswith("http") and
+               (a["href"].endswith(".shtml") or "/content/" in a["href"])]
+
+for src, lst in DOMESTIC:
     try:
-        lst = tidy(requests.get(list_url, headers=UA, timeout=TIMEOUT))
-        links = [a["href"] for a in BeautifulSoup(lst, "lxml").select("a[href]") if a["href"].startswith("http")][:MAX_PER]
-        for lk in links:
-            page = tidy(requests.get(lk, headers=UA, timeout=TIMEOUT))
-            soup = BeautifulSoup(page, "lxml")
-            title = soup.title.get_text(strip=True)
-            snip  = snippet(page)
-            add(title, snip, src)
+        page = tidy(requests.get(lst, headers=UA, timeout=TIMEOUT))
+        for lk in real_links(page)[:MAX_PER]:
+            art = tidy(requests.get(lk, headers=UA, timeout=TIMEOUT))
+            title = BeautifulSoup(art, "lxml").title.get_text(strip=True)
+            snip  = snippet(art)
+            add(title, snip, src, today.isoformat())
     except Exception as e:
-        print(src, "列表解析失败:", e)
+        print(src, "parse fail:", e)
+
+################ 3  snippet() 优化  ################
+def snippet(html, css="article p, div.article p, p", n=3, cap=300):
+    soup = BeautifulSoup(html, "lxml")
+    meta = soup.select_one("meta[name=description]")
+    if meta and meta.get("content"):
+        base = meta["content"]
+    else:
+        base = " ".join(p.get_text(" ", strip=True) for p in soup.select(css)[:n])
+    base = base or soup.get_text(" ", strip=True)
+    return ihtml.unescape(base)[:cap]
 
 # ---------- 保存 ----------
 with open("news.json", "w", encoding="utf-8") as f:
