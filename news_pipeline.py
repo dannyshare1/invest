@@ -110,11 +110,24 @@ async def push_serverchan(text):
     async with httpx.AsyncClient() as c:
         await c.post(f'https://sctapi.ftqq.com/{key}.send',data={'text':'每日投资资讯','desp':text},timeout=20)
 
-async def push_telegram(text):
-    tok=os.getenv('TELEGRAM_BOT_TOKEN'); cid=os.getenv('TELEGRAM_CHAT_ID');
-    if not tok or not cid: return
-    async with httpx.AsyncClient() as c:
-        await c.post(f'https://api.telegram.org/bot{tok}/sendMessage',data={'chat_id':cid,'text':text,'parse_mode':'Markdown'},timeout=20)
+@@
+-    async with httpx.AsyncClient(http2=False) as c:
++    # Telegram 自动分段 + 错误显示
++    async with httpx.AsyncClient(http2=False) as c:
+         for ch in chunks:
+-            await c.post(f'https://api.telegram.org/bot{tok}/sendMessage',
+-                         data={'chat_id':cid,'text':ch,'parse_mode':'Markdown'},timeout=20)
++            resp = await c.post(
++                f'https://api.telegram.org/bot{tok}/sendMessage',
++                data={'chat_id': cid, 'text': ch, 'parse_mode': 'Markdown'},
++                timeout=20)
++            if resp.status_code != 200:
++                rprint(f'[red]Telegram error {resp.status_code}: {resp.text}')
++                break
+@@
+-        feed = r.json().get("feed", [])
++        js = r.json()
++        feed = js["feed"] if isinstance(js.get("feed"), list) else []
 
 # ─── CLI ───
 
