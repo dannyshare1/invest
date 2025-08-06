@@ -77,7 +77,7 @@ def relevance(it,holds):
 # ─── 主流程 ───
 async def collect(holds,days,limit):
     st=datetime.utcnow()-timedelta(days=days); ed=datetime.utcnow()
-    async with httpx.AsyncClient(http2=True) as cli:
+    async with httpx.AsyncClient(http2=False) as cli:
         f=Fetcher(cli); tasks=[]
         for h in holds:
             if h.is_cn: tasks.append(retry(f.tushare,h.symbol,st,ed))
