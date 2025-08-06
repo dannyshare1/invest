@@ -125,13 +125,19 @@ if MS_KEY:
     except Exception as e:
         print("MStack err:", e)
 
-# ====== D. 国内四报 HTML ======
+# 1⃣  国内列表页 URL
 DOMESTIC = [
-    ("中国证券报",  "https://www.cs.com.cn/xwzx/hg/"),
+    ("中国证券报",  "https://www.cs.com.cn/ssgs/"),
     ("新华社财经",  "https://www.news.cn/fortune/"),
-    ("21财经",      "https://www.21jingji.com/list/stock"),
-    ("上海证券报",  "https://news.cnstock.com/news/")
+    ("21财经",      "https://m.21jingji.com/channel/stock"),
+    ("上海证券报",  "https://news.cnstock.com/news/sns_htfb/")
 ]
+
+# 2⃣  make_snippet() 里的默认 CSS
+def make_snippet(html: str,
+                 css="article p, div.article p, div.content p, p",
+                 n=3, cap=300):
+   
 def real_links(html):
     soup = BeautifulSoup(html,"lxml")
     return [a["href"] for a in soup.select("a[href]") 
