@@ -1,20 +1,20 @@
 name: Daily Briefing
 on:
   schedule:
-    - cron: '55 23 * * *'   # 07:55 CST
-  workflow_dispatch:
-
+    - cron: '55 23 * * *'   # 每天 07:55 CST
+  workflow_dispatch:        # 手动触发
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
-      ALPHA_KEY:     ${{ secrets.ALPHA_KEY }}
-      FINNHUB_KEY:   ${{ secrets.FINNHUB_KEY }}
-      JUHE_KEY:      ${{ secrets.JUHE_KEY }}
-      SCKEY:         ${{ secrets.SCKEY }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+      TUSHARE_TOKEN:       ${{ secrets.TUSHARE_TOKEN }}
+      ALPHA_KEY:           ${{ secrets.ALPHA_KEY }}
+      FINNHUB_KEY:         ${{ secrets.FINNHUB_KEY }}
+      JUHE_KEY:            ${{ secrets.JUHE_KEY }}
+      SCKEY:               ${{ secrets.SCKEY }}
+      TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+      QWEN_API_KEY:        ${{ secrets.QWEN_API_KEY }}   # ← daily_push_qwen.py 用
       HOLDINGS_JSON: |
         [{"symbol":"510880.SH","name":"中证红利ETF","weight":0.12},
          {"symbol":"AAPL","name":"Apple Inc","weight":0.1}]
@@ -25,21 +25,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - run: pip install httpx python-dateutil rich
-
-      - run: python news_pipeline.py --days 1 --max 40
-
-      - name: Show briefing in summary   # ① 日志里直接看
-        if: success()
+      - name: Install dependencies
         run: |
-          echo '### 今日重点财经新闻' >> $GITHUB_STEP_SUMMARY
-          cat briefing.md >> $GITHUB_STEP_SUMMARY
+          pip install httpx python-dateutil rich openai  # 够用就行，或者 pip install -r requirements.txt
 
-      - name: Upload briefing artifact   # ② 下载文件
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: briefing_files
-          path: |
-            briefing.md
-            news_today.json
+      # ① 生成并推送新闻摘要
+      - name: News briefing
+        run: python news_pipeline.py --days 1 --max 40
+
+      # ② 生成并推送投资建议
+      - name: Qwen portfolio advice
+        run: python daily_push_qwen.py
