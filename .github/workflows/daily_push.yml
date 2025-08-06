@@ -22,5 +22,5 @@
        - uses: actions/setup-python@v5
          with:
            python-version: '3.11'
-       - run: pip install -r requirements.txt
+       - run: pip install httpx python-dateutil rich
        - run: python news_pipeline.py --days 1 --max 40
