@@ -1,7 +1,11 @@
-中证红利ETF: "12%"
-半导体ETF: "0%"
-沪深300: "5%"
-短债: "83%"
-酒ETF: "0%"
-医药ETF: "0%"
-豆粕ETF: "0%"
+```json
+[
+  {"symbol": "515080.SH", "name": "中证红利ETF", "weight": 0.12},
+  {"symbol": "512480.SH", "name": "半导体ETF", "weight": 0.00},
+  {"symbol": "510300.SH", "name": "沪深300ETF", "weight": 0.05}
+  {"symbol": "511010.SH", "name": "国债ETF", "weight": 0.83}
+  {"symbol": "512690.SH", "name": "酒ETF", "weight": 0.00}
+  {"symbol": "512010.SH", "name": "医药ETF", "weight": 0.00}
+  {"symbol": "159985.SH", "name": "豆粕ETF", "weight": 0.00}
+]
+```
