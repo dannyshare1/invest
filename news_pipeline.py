@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py — 多源财经新闻聚合器（rate-limit friendly）
-• RSSHub 请求串行 + 3-4 s 间隔 ⇒ 消除 429
-• Tushare 批量结果按天缓存 ⇒ 避免“每天 2 次”限额
-• Server 酱仍自动跳过当日 5 次上限(code 40001)
+news_pipeline.py — 多源财经新闻聚合器（final r5）
+• Tushare 40203 时 fallback 到本地缓存
+• RSSHub 串行 + 5‒6 s 间隔 → 429 消失
+• 纯文本推送 & Server酱日限额自动跳过
 """
 from __future__ import annotations
-import argparse, asyncio, json, os, random, re, sys, logging
+import argparse, asyncio, json, os, random, re, sys, logging, time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from hashlib import md5
@@ -15,53 +15,60 @@ from typing import List, Sequence
 import httpx
 from dateutil import parser as dtparse
 
-# ─── 基本数据类 ───
+# ─── 数据类 ───
 @dataclass
 class Holding:
-    symbol: str; name: str; weight: float = 0.0
+    symbol: str; name: str; weight: float=0.0
     @property
     def clean(self): return self.symbol.split('.')[0]
     @property
-    def is_cn(self): return self.symbol.endswith(('.SH', '.SZ'))
+    def is_cn(self): return self.symbol.endswith(('.SH','.SZ'))
 
 @dataclass
 class NewsItem:
-    title: str; summary: str; url: str; published_at: str; source: str; sentiment: float; symbols: List[str]
+    title:str; summary:str; url:str; published_at:str; source:str; sentiment:float; symbols:List[str]
     def fp(self): return md5(self.url.encode()).hexdigest()
 
 # ─── 简易情感 ───
-_SENT_RE = re.compile(r"(利好|上涨|飙升|反弹|大涨|收涨|upbeat|bullish|positive|利空|下跌|暴跌|收跌|bearish|negative)", re.I)
+_SENT_RE=re.compile(r"(利好|上涨|飙升|反弹|大涨|收涨|upbeat|bullish|positive|利空|下跌|暴跌|收跌|bearish|negative)",re.I)
 def naive_sent(t): return max(min(len(_SENT_RE.findall(t))*0.1,1.0),-1.0)
 
-# ─── 工具 ───
+# ─── 重试工具 ───
 async def retry(fn,*a,retries=3,**k):
     for i in range(retries):
         try: return await fn(*a,**k)
         except Exception as e:
             if i==retries-1: raise
-            await asyncio.sleep(2**i+random.uniform(0.5,1.5))
+            await asyncio.sleep(2**i+random.uniform(1,2))
 
 # ─── Fetcher ───
 class Fetcher:
-    def __init__(s,c): s.c=c; s.tk=os.getenv('TUSHARE_TOKEN'); s.ak=os.getenv('ALPHA_KEY'); s.fk=os.getenv('FINNHUB_KEY')
+    rss_sem=asyncio.Semaphore(1)   # 串行
 
-    # Tushare — 每日一次并缓存
+    def __init__(s,c):
+        s.c=c; s.tk=os.getenv('TUSHARE_TOKEN'); s.ak=os.getenv('ALPHA_KEY'); s.fk=os.getenv('FINNHUB_KEY')
+
+    # Tushare 批量 & 当天缓存
     async def tushare_bulk(s,start,end):
         cache=Path(f"tushare_cache_{start.strftime('%Y%m%d')}.json")
         if cache.is_file():
-            logging.info("Tushare use local cache"); return [NewsItem(**d) for d in json.loads(cache.read_text('utf-8'))]
+            logging.info("Tushare — 使用本地缓存"); return [NewsItem(**d) for d in json.loads(cache.read_text('utf-8'))]
         if not s.tk: return []
         p={"api_name":"news","token":s.tk,
            "params":{"src":"eastmoney","start_date":start.strftime('%Y%m%d'),"end_date":end.strftime('%Y%m%d')},
            "fields":"title,content,url,datetime,src"}
         r=await s.c.post('https://api.tushare.pro',json=p,timeout=30)
         js=r.json()
+        if js.get('code')==40203:
+            logging.warning("Tushare 日额度已用尽，且无缓存，跳过 A 股新闻")
+            return []
         if js.get('code'):
             logging.warning(f"Tushare code {js.get('code')} msg={js.get('msg')}"); return []
         items=js.get('data',{}).get('items',[]) or []
-        out=[NewsItem(t,con[:120],url,dtparse.parse(dt).isoformat(),src,naive_sent(con),[]) for t,con,url,dt,src in items]
+        out=[NewsItem(t,con[:120],url,dtparse.parse(dt).isoformat(),src,naive_sent(con),[])
+             for t,con,url,dt,src in items]
         cache.write_text(json.dumps([asdict(i) for i in out],ensure_ascii=False))
-        logging.info(f"Tushare fetched {len(out)}")
+        logging.info(f"Tushare 拉取 {len(out)} 条")
         return out
 
     async def alpha_news(s,tks:Sequence[str]):
@@ -89,10 +96,10 @@ class Fetcher:
         data=r.json().get('result',{}).get('data',[]) or []
         return [NewsItem(d['title'],d.get('author_name',''),d['url'],d['date'],'聚合财经',naive_sent(d['title']),[]) for d in data]
 
-    # RSS — 全局 semaphore 串行 + 3-4 秒间隔
-    rss_sem=asyncio.Semaphore(1)
     async def rss(s,url:str,src:str):
+        # 全局串行 + 强延迟
         async with s.rss_sem:
+            await asyncio.sleep(random.uniform(1,2))
             try:
                 r=await s.c.get(url,timeout=20)
                 if r.status_code!=200:
@@ -105,7 +112,7 @@ class Fetcher:
                     try: published=dtparse.parse(pub).isoformat()
                     except: published=datetime.utcnow().isoformat()
                     out.append(NewsItem(ttl,desc[:120],link,published,src,naive_sent(ttl+desc),[]))
-                await asyncio.sleep(random.uniform(3,4))
+                await asyncio.sleep(random.uniform(5,6))
                 return out
             except Exception as e:
                 logging.error(f"{src} err: {e}"); return []
@@ -121,7 +128,8 @@ def rel(it,holds):
 async def collect(holds,days,limit):
     st=datetime.utcnow()-timedelta(days=days); ed=datetime.utcnow()
     async with httpx.AsyncClient(timeout=30) as cli:
-        f=Fetcher(cli); tasks=[retry(f.tushare_bulk,st,ed), retry(f.juhe_stream)]
+        f=Fetcher(cli)
+        tasks=[retry(f.tushare_bulk,st,ed), retry(f.juhe_stream)]
         ovs=[h.symbol for h in holds if not h.is_cn and '.' not in h.symbol]
         if ovs: tasks.append(retry(f.alpha_news,ovs))
         for h in holds:
@@ -146,20 +154,19 @@ def write(items):
     txt='今日重点财经新闻\n'+'\n'.join(f"{i+1}. {it.title} ({it.source}) {it.url}" for i,it in enumerate(items))
     Path('briefing.md').write_text(txt,'utf-8'); return txt
 
-def esc(x): return x.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
-async def sc(text):
-    key=os.getenv('SCKEY')
-    if not key: return
-    r=await httpx.AsyncClient().post(f'https://sctapi.ftqq.com/{key}.send',
-                                     data={'text':'投资资讯','desp':esc(text[:8000])},timeout=20)
+def esc(s): return s.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
+async def sc(t):
+    k=os.getenv('SCKEY')
+    if not k: return
+    r=await httpx.AsyncClient().post(f'https://sctapi.ftqq.com/{k}.send',
+                                     data={'text':'投资资讯','desp':esc(t[:8000])},timeout=20)
     if r.json().get('code')==40001: logging.warning('Server酱日限额，跳过')
-async def tg(text):
-    t,c=os.getenv('TELEGRAM_BOT_TOKEN'),os.getenv('TELEGRAM_CHAT_ID')
-    if not t or not c: return
-    seg=[text[i:i+3500] for i in range(0,len(text),3500)]
-    async with httpx.AsyncClient() as cli:
-        for s in seg:
-            await cli.post(f'https://api.telegram.org/bot{t}/sendMessage',data={'chat_id':c,'text':s},timeout=20)
+async def tg(t):
+    b=os.getenv('TELEGRAM_BOT_TOKEN'); c=os.getenv('TELEGRAM_CHAT_ID')
+    if not b or not c: return
+    for seg in [t[i:i+3500] for i in range(0,len(t),3500)]:
+        await httpx.AsyncClient().post(f'https://api.telegram.org/bot{b}/sendMessage',
+                                       data={'chat_id':c,'text':seg},timeout=20)
 
 def parse_holds(p):
     if p and Path(p).is_file(): return [Holding(**d) for d in json.loads(Path(p).read_text('utf-8'))]
@@ -176,6 +183,8 @@ def main():
     logging.info(f'✅ 输出 {len(items)} 条')
 
 if __name__=='__main__':
-    logging.basicConfig(level=logging.INFO,format='%(asctime)s - %(levelname)s - %(message)s',
-                        handlers=[logging.FileHandler('pipeline.log','a','utf-8'),logging.StreamHandler(sys.stdout)])
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(levelname)s - %(message)s',
+                        handlers=[logging.FileHandler('pipeline.log','a','utf-8'),
+                                  logging.StreamHandler(sys.stdout)])
     main()
