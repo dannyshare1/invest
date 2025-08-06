@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""news_pipeline.py — 多源财经新闻聚合器（stable‑r3）
+"""news_pipeline.py — 多源财经新闻聚合器（stable-r3）
 修复内容
 --------
 1. **Alpha Vantage feed==None** → 返回空列表而非抛错。
@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import List, Sequence
 import httpx
 from dateutil import parser as dtparse
-from rich import print as rprint
+import logging
+
+# 设置日志记录
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ─── 数据类 ───
 @dataclass
@@ -35,155 +38,283 @@ class NewsItem:
 _SENT_RE = re.compile(r"\b(upbeat|bullish|positive)\b|\b(downbeat|bearish|negative)\b", re.I)
 
 def naive_sent(text):
-    pos=len(_SENT_RE.findall(text))
-    return max(min(pos*0.1,1.0),-1.0)
+    pos = len(_SENT_RE.findall(text))
+    return max(min(pos * 0.1, 1.0), -1.0)
 
-async def retry(fn,*a,retries=3,**k):
+async def retry(fn, *a, retries=3, **k):
     for i in range(retries):
-        try: return await fn(*a,**k)
+        try:
+            return await fn(*a, **k)
         except Exception as e:
-            if i==retries-1: raise
-            await asyncio.sleep(2**i)
+            if i == retries - 1:
+                logging.error(f"Retry failed after {retries} attempts: {e}")
+                raise
+            logging.warning(f"Attempt {i+1} failed, retrying...")
+            await asyncio.sleep(2 ** i)
 
 # ─── Fetcher ───
 class Fetcher:
-    def __init__(s,c):
-        s.c=c; s.tk=os.getenv('TUSHARE_TOKEN'); s.ak=os.getenv('ALPHA_KEY'); s.fk=os.getenv('FINNHUB_KEY'); s.jk=os.getenv('JUHE_KEY')
+    def __init__(self, c):
+        self.c = c
+        self.tk = os.getenv('TUSHARE_TOKEN')
+        self.ak = os.getenv('ALPHA_KEY')
+        self.fk = os.getenv('FINNHUB_KEY')
+        self.jk = os.getenv('JUHE_KEY')
 
-    async def tushare(s,code,start,end):
-        if not s.tk: return []
-        p={"api_name":"news","token":s.tk,"params":{"src":"eastmoney","start_date":start.strftime('%Y%m%d'),"end_date":end.strftime('%Y%m%d')},"fields":"title,content,url,datetime,src"}
-        r=await s.c.post('https://api.tushare.pro',json=p,timeout=20)
-        items=r.json().get('data',{}).get('items',[])
-        return [NewsItem(t,con[:120],url,dtparse.parse(dtstr).isoformat(),src,naive_sent(con),[code]) for t,con,url,dtstr,src in items]
-
-    async def alpha_news(s, tickers: Sequence[str]):
-        if not s.ak or not tickers:
+    async def tushare(self, code, start, end):
+        if not self.tk:
+            logging.info("Tushare token未设置，跳过")
             return []
-        r = await s.c.get(
-            'https://www.alphavantage.co/query',
-            params={
-                'function': 'NEWS_SENTIMENT',
-                'tickers': ','.join(tickers[:100]),
-                'apikey': s.ak,
-            },
-            timeout=20,
-        )
-        js = r.json()
-        feed = js.get('feed')
-        if not isinstance(feed, list):
-            return []  # API 有时返回 null 或 rate‑limit 提示
+        p = {
+            "api_name": "news",
+            "token": self.tk,
+            "params": {"src": "eastmoney", "start_date": start.strftime('%Y%m%d'), "end_date": end.strftime('%Y%m%d')},
+            "fields": "title,content,url,datetime,src"
+        }
+        try:
+            r = await self.c.post('https://api.tushare.pro', json=p, timeout=20)
+            r.raise_for_status()
+            response_data = r.json()
+            items = response_data.get('data', {}).get('items', [])
+            if not isinstance(items, list):
+                logging.warning(f"Tushare 返回非预期格式: {response_data}")
+                return []
+            return [
+                NewsItem(t, con[:120], url, dtparse.parse(dtstr).isoformat(), src, naive_sent(con), [code])
+                for t, con, url, dtstr, src in items
+            ]
+        except httpx.HTTPStatusError as e:
+            logging.error(f"Tushare HTTP 错误: {e}")
+            return []
+        except Exception as e:
+            logging.error(f"Tushare 请求失败: {e}")
+            return []
 
-        out = []
-        for it in feed:
-            syms = [x.get('ticker') for x in it.get('ticker_sentiment', []) if x.get('ticker')]
-            out.append(
-                NewsItem(
-                    it['title'],
-                    it['summary'],
-                    it['url'],
-                    it['time_published'],
-                    it.get('source', 'AV'),
-                    float(it.get('overall_sentiment_score', 0)),
-                    syms,
+    async def alpha_news(self, tickers: Sequence[str]):
+        if not self.ak or not tickers:
+            logging.info("Alpha Vantage key未设置或没有ticker，跳过")
+            return []
+        params = {
+            'function': 'NEWS_SENTIMENT',
+            'tickers': ','.join(tickers[:100]),
+            'apikey': self.ak,
+        }
+        try:
+            r = await self.c.get('https://www.alphavantage.co/query', params=params, timeout=20)
+            r.raise_for_status()
+            js = r.json()
+            feed = js.get('feed')
+            if feed is None:
+                logging.warning("Alpha Vantage 返回 None 或非预期格式: {js}")
+                return []
+            if not isinstance(feed, list):
+                logging.warning(f"Alpha Vantage 返回非预期格式: {feed}")
+                return []
+
+            out = []
+            for it in feed:
+                syms = [x.get('ticker') for x in it.get('ticker_sentiment', []) if x.get('ticker')]
+                out.append(
+                    NewsItem(
+                        it['title'],
+                        it['summary'],
+                        it['url'],
+                        it['time_published'],
+                        it.get('source', 'AV'),
+                        float(it.get('overall_sentiment_score', 0)),
+                        syms,
+                    )
                 )
+            return out
+        except httpx.HTTPStatusError as e:
+            logging.error(f"Alpha Vantage HTTP 错误: {e}")
+            return []
+        except Exception as e:
+            logging.error(f"Alpha Vantage 请求失败: {e}")
+            return []
+
+    async def finnhub(self, sym, start, end):
+        if not self.fk:
+            logging.info("Finnhub token未设置，跳过")
+            return []
+        try:
+            r = await self.c.get(
+                'https://finnhub.io/api/v1/company-news',
+                params={'symbol': sym, 'from': start.date(), 'to': end.date(), 'token': self.fk},
+                timeout=20
             )
-        return out
+            r.raise_for_status()
+            response_data = r.json()
+            if not isinstance(response_data, list):
+                logging.warning(f"Finnhub 返回非预期格式: {response_data}")
+                return []
+            return [
+                NewsItem(
+                    d['headline'],
+                    d['summary'],
+                    d['url'],
+                    datetime.utcfromtimestamp(d['datetime']).isoformat() + 'Z',
+                    d['source'],
+                    naive_sent(d['summary']),
+                    [sym]
+                ) for d in response_data
+            ]
+        except httpx.HTTPStatusError as e:
+            logging.error(f"Finnhub HTTP 错误: {e}")
+            return []
+        except Exception as e:
+            logging.error(f"Finnhub 请求失败: {e}")
+            return []
 
-    async def finnhub(s,sym,start,end):
-        if not s.fk: return []
-        r=await s.c.get('https://finnhub.io/api/v1/company-news',params={'symbol':sym,'from':start.date(),'to':end.date(),'token':s.fk},timeout=20)
-        return [NewsItem(d['headline'],d['summary'],d['url'],datetime.utcfromtimestamp(d['datetime']).isoformat()+'Z',d['source'],naive_sent(d['summary']),[sym]) for d in r.json()]
-
-    async def juhe_news(s,kw):
-        if not s.jk: return []
-        r=await s.c.get('https://caijing.juheapi.com/japi/toh',params={'word':kw,'key':s.jk},timeout=20)
-        if r.status_code!=200: return []
-        return [NewsItem(d['title'],d.get('digest',''),d['url'],d.get('pubDate',datetime.utcnow().isoformat()),'Juhe',naive_sent(d.get('digest','')),[kw]) for d in r.json().get('result',[])]
+    async def juhe_news(self, kw):
+        if not self.jk:
+            logging.info("Juhe key未设置，跳过")
+            return []
+        try:
+            r = await self.c.get(
+                'https://caijing.juheapi.com/japi/toh',
+                params={'word': kw, 'key': self.jk},
+                timeout=20
+            )
+            r.raise_for_status()
+            response_data = r.json()
+            result = response_data.get('result', [])
+            if not isinstance(result, list):
+                logging.warning(f"Juhe 返回非预期格式: {response_data}")
+                return []
+            return [
+                NewsItem(
+                    d['title'],
+                    d.get('digest', ''),
+                    d['url'],
+                    d.get('pubDate', datetime.utcnow().isoformat()),
+                    'Juhe',
+                    naive_sent(d.get('digest', '')),
+                    [kw]
+                ) for d in result
+            ]
+        except httpx.HTTPStatusError as e:
+            logging.error(f"Juhe HTTP 错误: {e}")
+            return []
+        except Exception as e:
+            logging.error(f"Juhe 请求失败: {e}")
+            return []
 
 # ─── 相关度 ───
-def relevance(it,holds):
-    txt=f"{it.title} {it.summary}".lower(); score=0.0
+def relevance(it, holds):
+    txt = f"{it.title} {it.summary}".lower(); score = 0.0
     for h in holds:
-        if h.symbol in it.symbols: score+=0.6
-        elif h.clean.lower() in txt or h.name.lower() in txt: score+=0.3
-    return min(score+abs(it.sentiment)*0.1,1.0)
+        if h.symbol in it.symbols:
+            score += 0.6
+        elif h.clean.lower() in txt or h.name.lower() in txt:
+            score += 0.3
+    return min(score + abs(it.sentiment) * 0.1, 1.0)
 
 # ─── 主流程 ───
-async def collect(holds,days,limit):
-    st=datetime.utcnow()-timedelta(days=days); ed=datetime.utcnow()
+async def collect(holds, days, limit):
+    st = datetime.utcnow() - timedelta(days=days); ed = datetime.utcnow()
     async with httpx.AsyncClient(http2=False) as cli:
-        f=Fetcher(cli); tasks=[]
+        f = Fetcher(cli); tasks = []
         for h in holds:
-            if h.is_cn: tasks.append(retry(f.tushare,h.symbol,st,ed))
-        ovs=[h.symbol for h in holds if not h.is_cn and '.' not in h.symbol]
-        if ovs: tasks.append(retry(f.alpha_news,ovs))
+            if h.is_cn:
+                tasks.append(retry(f.tushare, h.symbol, st, ed))
+        ovs = [h.symbol for h in holds if not h.is_cn and '.' not in h.symbol]
+        if ovs:
+            tasks.append(retry(f.alpha_news, ovs))
         for h in holds:
-            if not h.is_cn: tasks.append(retry(f.finnhub,h.symbol.split('.')[0],st,ed))
+            if not h.is_cn:
+                tasks.append(retry(f.finnhub, h.symbol.split('.')[0], st, ed))
         for h in holds:
-            if h.is_cn: tasks.append(retry(f.juhe_news,h.name))
-        res=await asyncio.gather(*tasks,return_exceptions=True)
-    pool={}
+            if h.is_cn:
+                tasks.append(retry(f.juhe_news, h.name))
+        res = await asyncio.gather(*tasks, return_exceptions=True)
+    pool = {}
     for r in res:
-        if isinstance(r,Exception): rprint(f"[red]Fetcher error: {r}"); continue
-        for it in r: pool[it.fp()]=it
-    return sorted(pool.values(),key=lambda x: relevance(x,holds),reverse=True)[:limit]
+        if isinstance(r, Exception):
+            logging.error(f"Fetcher error: {r}")
+            continue
+        for it in r:
+            pool[it.fp()] = it
+    return sorted(pool.values(), key=lambda x: relevance(x, holds), reverse=True)[:limit]
 
 # ─── 文件输出 ───
 def write_files(items):
-    Path('news_today.json').write_text(json.dumps([asdict(i) for i in items],ensure_ascii=False,indent=2),encoding='utf-8')
-    lines=['# 今日重点财经新闻\n']
-    for idx,it in enumerate(items,1):
-        ts=dtparse.isoparse(it.published_at).strftime('%m-%d %H:%M')
+    Path('news_today.json').write_text(json.dumps([asdict(i) for i in items], ensure_ascii=False, indent=2), encoding='utf-8')
+    lines = ['# 今日重点财经新闻\n']
+    for idx, it in enumerate(items, 1):
+        ts = dtparse.isoparse(it.published_at).strftime('%m-%d %H:%M')
         lines.append(f"{idx}. **{it.title}** [{it.source}]({it.url}) ({ts})")
-    md='\n'.join(lines)
-    Path('briefing.md').write_text(md,encoding='utf-8')
+    md = '\n'.join(lines)
+    Path('briefing.md').write_text(md, encoding='utf-8')
     return md
 
 # ─── 推送 ───
 async def push_serverchan(text):
-    key=os.getenv('SCKEY');
-    if not key: return
-    await httpx.AsyncClient().post(f'https://sctapi.ftqq.com/{key}.send',data={'text':'每日投资资讯','desp':text},timeout=20)
+    key = os.getenv('SCKEY')
+    if not key:
+        logging.info("Server酱 Key 未设置，跳过推送")
+        return
+    try:
+        await httpx.AsyncClient().post(
+            f'https://sctapi.ftqq.com/{key}.send',
+            data={'text': '每日投资资讯', 'desp': text},
+            timeout=20
+        )
+    except Exception as e:
+        logging.error(f"Server酱推送失败: {e}")
 
 async def push_telegram(text: str):
-    """Send plain‑text message to Telegram. Uses the same logic as daily_push_qwen.py
+    """Send plain-text message to Telegram. Uses the same logic as daily_push_qwen.py
     (chunk to ≤ 3 500 chars, no Markdown)."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
-        return  # Telegram not configured
+        logging.info("Telegram Token 或 Chat ID 未设置，跳过推送")
+        return
 
     chunks = [text[i:i + 3500] for i in range(0, len(text), 3500)]
     async with httpx.AsyncClient() as client:
         for chunk in chunks:
-            resp = await client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                data={"chat_id": chat_id, "text": chunk},  # plain text
-                timeout=20,
-            )
-            if resp.status_code != 200:
-                rprint(f"[red]Telegram error {resp.status_code}: {resp.text}")
+            try:
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    data={"chat_id": chat_id, "text": chunk},  # plain text
+                    timeout=20,
+                )
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                logging.error(f"Telegram HTTP 错误 {resp.status_code}: {resp.text}")
+                break
+            except Exception as e:
+                logging.error(f"Telegram 推送失败: {e}")
                 break
 
 # ─── CLI ───
-def parse_holds(pth:str|None):
+def parse_holds(pth: str | None):
     if pth and Path(pth).is_file():
-        data=json.loads(Path(pth).read_text('utf-8'))
+        data = json.loads(Path(pth).read_text('utf-8'))
     else:
-        data=json.loads(os.getenv('HOLDINGS_JSON','[]'))
+        data = json.loads(os.getenv('HOLDINGS_JSON', '[]'))
     return [Holding(**d) for d in data]
 
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--holdings',default='holdings.json'); ap.add_argument('--days',type=int,default=1); ap.add_argument('--max',type=int,default=40); args=ap.parse_args()
-    holds=parse_holds(args.holdings)
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--holdings', default='holdings.json')
+    ap.add_argument('--days', type=int, default=1)
+    ap.add_argument('--max', type=int, default=40)
+    args = ap.parse_args()
+    holds = parse_holds(args.holdings)
     if not holds:
-        rprint('[yellow]⚠️  持仓为空'); return
-    items=asyncio.run(collect(holds,args.days,args.max))
-    md=write_files(items)
+        logging.warning('持仓为空')
+        return
+    items = asyncio.run(collect(holds, args.days, args.max))
+    md = write_files(items)
     asyncio.run(push_serverchan(md))
     asyncio.run(push_telegram(md))
-    rprint(f'[green]✅ 输出 {len(items)} 条')
+    logging.info(f'✅ 输出 {len(items)} 条')
 
-if __name__=='__main__':
+if __name__ == '__main__':
     main()
+
+
+
