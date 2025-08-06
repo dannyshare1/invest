@@ -50,7 +50,7 @@ jobs:
         python news_pipeline.py --holdings holdings.json --days 1 --max 40
 
     - name: Upload generated files
-      uses: actions/upload-artifact@latest
+      uses: actions/upload-artifact@v3
       with:
         name: generated-files
         path: |
