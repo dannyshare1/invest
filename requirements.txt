@@ -1,0 +1,6 @@
+httpx
+python-dateutil
+rich
+openai
+pyyaml
+requests
