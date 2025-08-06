@@ -117,7 +117,7 @@ async def push_telegram(text: str):
         for ch in chunks:
             resp = await c.post(
                 f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage',
-                data={'chat_id': cid, 'text': ch, 'parse_mode': 'Markdown'},
+                data={'TELEGRAM_CHAT_ID': cid, 'text': ch, 'parse_mode': 'Markdown'},
                 timeout=20
             )
             if resp.status_code != 200:
