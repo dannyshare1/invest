@@ -1,8 +1,10 @@
 name: Daily Briefing
+
 on:
   schedule:
-    - cron: '55 23 * * *'   # 每天 07:55 CST
+    - cron: '55 23 * * *'   # 每天 07:55 CST (实际为UTC 23:55)
   workflow_dispatch:        # 手动触发
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -24,9 +26,8 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install httpx python-dateutil rich openai pyyaml requests
-          
+        run: pip install -r requirements.txt
+
       - name: holdings_tracker
         run: python holdings_tracker.py
         
@@ -37,3 +38,6 @@ jobs:
       # ② 生成并推送投资建议
       - name: Qwen portfolio advice
         run: python daily_push_qwen.py
+
+
+
