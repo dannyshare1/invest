@@ -68,7 +68,7 @@ payload_base = {
     "parameters": {"result_format": "message"},
     "workspace": "ilm-c9d12em00wxjtstn"   # ← 换成你的 workspace
 }
-models = ["qwen-max", "qwen-plus"]
+models = ["qwen-plus", "qwen-max"]
 used_model, resp = None, None
 
 for model in models:
