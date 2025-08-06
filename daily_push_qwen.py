@@ -1,21 +1,9 @@
 # -*- coding: utf-8 -*-
-"""daily_push_qwen.py — 生成每日投资建议并推送
-
-替换旧版脚本，解决 NameError / Telegram 长度超限等问题。
-关键点
-———
-1. **动态持仓**：与 news_pipeline.py 共用 `HOLDINGS_JSON` / holdings.json。
-2. **调用通义千问 (Qwen)**：示例使用官方 ChatCompletion REST。
-3. **推送**：Server 酱 & Telegram；Telegram 自动分段 ≤ 4096 字。
-4. **文件依赖**：可引用 news_pipeline.py 产出的 `briefing.md` 作为市场新闻上下文。如果文件不存在，自动跳过。
-
-依赖：
-    pip install httpx rich
-"""
 from __future__ import annotations
 import asyncio, os, json, pathlib, textwrap, typing as t
 from datetime import datetime
 import httpx
+import sys
 # from rich import print as rprint  # Removed in favor of logging
 import logging
 
