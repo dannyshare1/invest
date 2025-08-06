@@ -21,7 +21,7 @@ from rich import print as rprint
 
 # ─── 配置 ───
 QWEN_API = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-MODEL_NAME = "qwen-plus-v2"  # 亦可修改成你的付费模型
+MODEL_NAME = "qwen-plus"  # 亦可修改成你的付费模型
 
 # ─── 数据加载 ───
 
