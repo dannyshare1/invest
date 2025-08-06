@@ -28,7 +28,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install httpx python-dateutil rich openai pyyaml requests
-
+          
+      - name: holdings_tracker
+        run: python holdings_tracker.py
+        
       # ① 生成并推送新闻摘要
       - name: News briefing
         run: python news_pipeline.py --days 1 --max 40
