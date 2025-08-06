@@ -1,26 +1,45 @@
- name: Daily Briefing
- on:
-   schedule:
-     - cron: '55 23 * * *'  # 07:55 CST
-   workflow_dispatch:
- jobs:
-   run:
-     runs-on: ubuntu-latest
-     env:
-       TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
-       ALPHA_KEY:     ${{ secrets.ALPHA_KEY }}
-       FINNHUB_KEY:   ${{ secrets.FINNHUB_KEY }}
-       JUHE_KEY:      ${{ secrets.JUHE_KEY }}
-       SCKEY:         ${{ secrets.SCKEY }}
-       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-       TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-       HOLDINGS_JSON: |
-         [{"symbol":"510880.SH","name":"中证红利ETF","weight":0.12},
-          {"symbol":"AAPL","name":"Apple Inc","weight":0.1}]
-     steps:
-       - uses: actions/checkout@v4
-       - uses: actions/setup-python@v5
-         with:
-           python-version: '3.11'
-       - run: pip install httpx python-dateutil rich
-       - run: python news_pipeline.py --days 1 --max 40
+name: Daily Briefing
+on:
+  schedule:
+    - cron: '55 23 * * *'   # 07:55 CST
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+      ALPHA_KEY:     ${{ secrets.ALPHA_KEY }}
+      FINNHUB_KEY:   ${{ secrets.FINNHUB_KEY }}
+      JUHE_KEY:      ${{ secrets.JUHE_KEY }}
+      SCKEY:         ${{ secrets.SCKEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+      HOLDINGS_JSON: |
+        [{"symbol":"510880.SH","name":"中证红利ETF","weight":0.12},
+         {"symbol":"AAPL","name":"Apple Inc","weight":0.1}]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install httpx python-dateutil rich
+
+      - run: python news_pipeline.py --days 1 --max 40
+
+      - name: Show briefing in summary   # ① 日志里直接看
+        if: success()
+        run: |
+          echo '### 今日重点财经新闻' >> $GITHUB_STEP_SUMMARY
+          cat briefing.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload briefing artifact   # ② 下载文件
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: briefing_files
+          path: |
+            briefing.md
+            news_today.json
