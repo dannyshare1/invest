@@ -22,11 +22,22 @@ weekday = "一二三四五六日"[bj_now.weekday()]
 title = f"📈 每日投资建议 · {date_str}"
 
 # ——— 读取持仓 ———
-with open("holdings.yaml", "r", encoding="utf-8") as f:
-    holdings = yaml.safe_load(f)
-if round(sum(float(v.strip('%')) for v in holdings.values())) != 100:
-    raise ValueError("持仓总和≠100%")
-holdings_lines = "\n".join(f"- {k}：{v}" for k, v in holdings.items())
+import json, os, yaml, pathlib
+
+def load_holdings():
+    # 优先读环境变量
+    env = os.getenv("HOLDINGS_JSON")
+    if env:
+        return json.loads(env)
+
+    # 再找 holdings.json
+    if pathlib.Path("holdings.json").is_file():
+        return json.loads(open("holdings.json", "r", encoding="utf-8").read())
+
+    # 最后才尝试 holdings.yaml
+    return yaml.safe_load(open("holdings.yaml", "r", encoding="utf-8"))
+
+holdings = load_holdings()
 
 # ——— 仓位变动记录 ———
 last_path = "last_holdings.yaml"
