@@ -110,16 +110,19 @@ async def push_serverchan(text):
     async with httpx.AsyncClient() as c:
         await c.post(f'https://sctapi.ftqq.com/{key}.send',data={'text':'每日投资资讯','desp':text},timeout=20)
 
-# Telegram 自动分段 + 错误显示
-async with httpx.AsyncClient(http2=False) as c:
-    for ch in chunks:
-        resp = await c.post(
-            f'https://api.telegram.org/bot{tok}/sendMessage',
-            data={'chat_id': cid, 'text': ch, 'parse_mode': 'Markdown'},
-            timeout=20)
-        if resp.status_code != 200:
-            rprint(f'[red]Telegram error {resp.status_code}: {resp.text}')
-            break
+async def push_telegram(text: str):
+    # 把长文本分片，Telegram 单条消息限制约 4096 字，留些余量用 2000
+    chunks = [text[i:i+2000] for i in range(0, len(text), 2000)]
+    async with httpx.AsyncClient() as c:
+        for ch in chunks:
+            resp = await c.post(
+                f'https://api.telegram.org/bot{tok}/sendMessage',
+                data={'chat_id': cid, 'text': ch, 'parse_mode': 'Markdown'},
+                timeout=20
+            )
+            if resp.status_code != 200:
+                rprint(f'[red]Telegram error {resp.status_code}: {resp.text}')
+                break
 
     js = r.json()
     feed = js["feed"] if isinstance(js.get("feed"), list) else []
