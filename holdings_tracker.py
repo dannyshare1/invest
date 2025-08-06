@@ -1,46 +1,34 @@
-# -*- coding: utf-8 -*-
-"""holdings_tracker.py — 持仓变动监控器
-
-用途
-----
-1. **作为流水线第一步**：在 news_pipeline / daily_push 前先运行本脚本。
-2. **功能**：
-   - 读取 `holdings.json`（当前持仓）。
-   - 与上一次快照 `holdings_snapshot.json` 对比。
-   - 如有变动（新增 / 删除 / 比例变化），把差异记录到 `holdings_log.csv`，并更新快照。
-   - 若无变动，则什么也不写。
-
-依赖：仅标准库。
-
-`holdings.json` 格式：
-[
-  {"symbol": "510880.SH", "name": "中证红利ETF", "weight": 0.12},
-  ...
-]
-
-`holdings_log.csv` 样例：
-```
-2025-08-06,ADD,512480.SH,半导体ETF,0.00
-2025-08-07,UPDATE,510880.SH,中证红利ETF,0.10->0.08
-2025-08-09,REMOVE,159985.SH,豆粕ETF,0.00
-```
 """
 from __future__ import annotations
-import json, csv, datetime, pathlib, sys, typing as t
+import json
+import csv
+import datetime
+import pathlib
+import sys
+import logging
+from typing import List, Dict
 
 SNAPSHOT = pathlib.Path('holdings_snapshot.json')
 LOG_FILE = pathlib.Path('holdings_log.csv')
 CUR_FILE = pathlib.Path('holdings.json')
 
-def load_json(path: pathlib.Path) -> t.List[dict]:
-    if not path.is_file():
-        return []
-    return json.loads(path.read_text('utf-8'))
+# 设置日志记录
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def dict_by_symbol(items: t.List[dict]):
+def load_json(path: pathlib.Path) -> List[Dict]:
+    try:
+        if not path.is_file():
+            logging.warning(f"File {path} not found")
+            return []
+        return json.loads(path.read_text('utf-8'))
+    except Exception as e:
+        logging.error(f"Failed to load JSON from {path}: {e}")
+        return []
+
+def dict_by_symbol(items: List[Dict]):
     return {i['symbol']: i for i in items}
 
-def compare(old: t.List[dict], new: t.List[dict]):
+def compare(old: List[Dict], new: List[Dict]):
     old_map, new_map = dict_by_symbol(old), dict_by_symbol(new)
     changes = []
     today = datetime.date.today().isoformat()
@@ -58,31 +46,37 @@ def compare(old: t.List[dict], new: t.List[dict]):
                 changes.append([today, 'UPDATE', sym, item['name'], f"{old_w}->{item['weight']}"])
     return changes
 
-def append_log(rows: t.List[list]):
+def append_log(rows: List[List[str]]):
     if not rows:
         return
     new_file = not LOG_FILE.is_file()
-    with LOG_FILE.open('a', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        if new_file:
-            writer.writerow(['date', 'type', 'symbol', 'name', 'detail'])
-        writer.writerows(rows)
-
+    try:
+        with LOG_FILE.open('a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if new_file:
+                writer.writerow(['date', 'type', 'symbol', 'name', 'detail'])
+            writer.writerows(rows)
+    except Exception as e:
+        logging.error(f"Failed to append log to {LOG_FILE}: {e}")
 
 def main():
     if not CUR_FILE.is_file():
-        print('❌ holdings.json not found', file=sys.stderr)
+        logging.error("holdings.json not found")
         sys.exit(1)
     curr = load_json(CUR_FILE)
     prev = load_json(SNAPSHOT)
     diff = compare(prev, curr)
     append_log(diff)
     # update snapshot
-    SNAPSHOT.write_text(json.dumps(curr, ensure_ascii=False, indent=2), encoding='utf-8')
+    try:
+        SNAPSHOT.write_text(json.dumps(curr, ensure_ascii=False, indent=2), encoding='utf-8')
+    except Exception as e:
+        logging.error(f"Failed to update snapshot file {SNAPSHOT}: {e}")
+        return
     if diff:
-        print(f'📈 Holdings changed, {len(diff)} records logged.')
+        logging.info(f"Holdings changed, {len(diff)} records logged.")
     else:
-        print('✅ Holdings unchanged.')
+        logging.info("Holdings unchanged.")
 
 if __name__ == '__main__':
     main()
