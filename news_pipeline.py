@@ -79,12 +79,13 @@ class Fetcher:
             if not isinstance(items, list):
                 logging.warning(f"Tushare 返回非预期格式: {response_data}")
                 return []
+            logging.info(f"Tushare 获取到 {len(items)} 条新闻")
             return [
                 NewsItem(t, con[:120], url, dtparse.parse(dtstr).isoformat(), src, naive_sent(con), [code])
                 for t, con, url, dtstr, src in items
             ]
         except httpx.HTTPStatusError as e:
-            logging.error(f"Tushare HTTP 错误: {e}")
+            logging.error(f"Tushare HTTP 错误: {e.response.status_code} - {e.response.text}")
             return []
         except Exception as e:
             logging.error(f"Tushare 请求失败: {e}")
@@ -119,15 +120,16 @@ class Fetcher:
                         it['title'],
                         it['summary'],
                         it['url'],
-                        it['time_published'],
+                        it.get('time_published'),
                         it.get('source', 'AV'),
                         float(it.get('overall_sentiment_score', 0)),
                         syms,
                     )
                 )
+            logging.info(f"Alpha Vantage 获取到 {len(out)} 条新闻")
             return out
         except httpx.HTTPStatusError as e:
-            logging.error(f"Alpha Vantage HTTP 错误: {e}")
+            logging.error(f"Alpha Vantage HTTP 错误: {e.response.status_code} - {e.response.text}")
             return []
         except Exception as e:
             logging.error(f"Alpha Vantage 请求失败: {e}")
@@ -148,6 +150,7 @@ class Fetcher:
             if not isinstance(response_data, list):
                 logging.warning(f"Finnhub 返回非预期格式: {response_data}")
                 return []
+            logging.info(f"Finnhub 获取到 {len(response_data)} 条新闻")
             return [
                 NewsItem(
                     d['headline'],
@@ -160,7 +163,7 @@ class Fetcher:
                 ) for d in response_data
             ]
         except httpx.HTTPStatusError as e:
-            logging.error(f"Finnhub HTTP 错误: {e}")
+            logging.error(f"Finnhub HTTP 错误: {e.response.status_code} - {e.response.text}")
             return []
         except Exception as e:
             logging.error(f"Finnhub 请求失败: {e}")
@@ -182,6 +185,7 @@ class Fetcher:
             if not isinstance(result, list):
                 logging.warning(f"Juhe 返回非预期格式: {response_data}")
                 return []
+            logging.info(f"Juhe 获取到 {len(result)} 条新闻")
             return [
                 NewsItem(
                     d['title'],
@@ -194,7 +198,7 @@ class Fetcher:
                 ) for d in result
             ]
         except httpx.HTTPStatusError as e:
-            logging.error(f"Juhe HTTP 错误: {e}")
+            logging.error(f"Juhe HTTP 错误: {e.response.status_code} - {e.response.text}")
             return []
         except Exception as e:
             logging.error(f"Juhe 请求失败: {e}")
@@ -239,14 +243,20 @@ async def collect(holds, days, limit):
 
 # ─── 文件输出 ───
 def write_files(items):
-    Path('news_today.json').write_text(json.dumps([asdict(i) for i in items], ensure_ascii=False, indent=2), encoding='utf-8')
+    if not items:
+        logging.warning("没有获取到任何新闻，无法生成文件")
+        return ""
+    news_json_path = Path('news_today.json')
+    briefing_md_path = Path('briefing.md')
+    news_json_path.write_text(json.dumps([asdict(i) for i in items], ensure_ascii=False, indent=2), encoding='utf-8')
     lines = ['# 今日重点财经新闻\n']
     for idx, it in enumerate(items, 1):
         ts = dtparse.isoparse(it.published_at).strftime('%m-%d %H:%M')
         lines.append(f"{idx}. **{it.title}** [{it.source}]({it.url}) ({ts})")
-    md = '\n'.join(lines)
-    Path('briefing.md').write_text(md, encoding='utf-8')
-    return md
+    md_content = '\n'.join(lines)
+    briefing_md_path.write_text(md_content, encoding='utf-8')
+    logging.info(f"生成了 {len(items)} 条新闻，保存到 {news_json_path} 和 {briefing_md_path}")
+    return md_content
 
 # ─── 推送 ───
 async def push_serverchan(text):
@@ -260,6 +270,7 @@ async def push_serverchan(text):
             data={'text': '每日投资资讯', 'desp': text},
             timeout=20
         )
+        logging.info("Server酱推送成功")
     except Exception as e:
         logging.error(f"Server酱推送失败: {e}")
 
@@ -282,6 +293,7 @@ async def push_telegram(text: str):
                     timeout=20,
                 )
                 resp.raise_for_status()
+                logging.info("Telegram 推送成功")
             except httpx.HTTPStatusError as e:
                 logging.error(f"Telegram HTTP 错误 {resp.status_code}: {resp.text}")
                 break
