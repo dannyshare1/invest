@@ -57,16 +57,37 @@ class Fetcher:
         items=r.json().get('data',{}).get('items',[])
         return [NewsItem(t,con[:120],url,dtparse.parse(dtstr).isoformat(),src,naive_sent(con),[code]) for t,con,url,dtstr,src in items]
 
-    async def alpha_news(s,tickers:Sequence[str]):
-        if not s.ak or not tickers: return []
-        r=await s.c.get('https://www.alphavantage.co/query',params={'function':'NEWS_SENTIMENT','tickers':','.join(tickers[:100]),'apikey':s.ak},timeout=20)
-        js=r.json(); feed=js.get('feed')
-        if not isinstance(feed,list):
+    async def alpha_news(s, tickers: Sequence[str]):
+        if not s.ak or not tickers:
             return []
-        out=[]
+        r = await s.c.get(
+            'https://www.alphavantage.co/query',
+            params={
+                'function': 'NEWS_SENTIMENT',
+                'tickers': ','.join(tickers[:100]),
+                'apikey': s.ak,
+            },
+            timeout=20,
+        )
+        js = r.json()
+        feed = js.get('feed')
+        if not isinstance(feed, list):
+            return []  # API 有时返回 null 或 rate‑limit 提示
+
+        out = []
         for it in feed:
-            syms=[x.get('ticker') for x in it.get('ticker_sentiment',[]) if x.get('ticker')]
-            out.append(NewsItem(it['title'],it['summary'],it['url'],it['time_published'],it.get('source','AV'),float(it.get('overall_sentiment_score',0)),syms))
+            syms = [x.get('ticker') for x in it.get('ticker_sentiment', []) if x.get('ticker')]
+            out.append(
+                NewsItem(
+                    it['title'],
+                    it['summary'],
+                    it['url'],
+                    it['time_published'],
+                    it.get('source', 'AV'),
+                    float(it.get('overall_sentiment_score', 0)),
+                    syms,
+                )
+            )
         return out
 
     async def finnhub(s,sym,start,end):
