@@ -1,4 +1,29 @@
+# -*- coding: utf-8 -*-
+"""holdings_tracker.py — 持仓变动监控器
+
+用途
+----
+1. **作为流水线第一步**：在 news_pipeline / daily_push 前先运行本脚本。
+2. **功能**：
+   - 读取 `holdings.json`（当前持仓）。
+   - 与上一次快照 `holdings_snapshot.json` 对比。
+   - 如有变动（新增 / 删除 / 比例变化），把差异记录到 `holdings_log.csv`，并更新快照。
+   - 若无变动，则什么也不写。
+
+依赖：仅标准库。
+
+`holdings.json` 格式：
+[
+  {"symbol": "510880.SH", "name": "中证红利ETF", "weight": 0.12},
+  ...
+]
+
+`holdings_log.csv` 样例：
+
+
+
 """
+
 from __future__ import annotations
 import json
 import csv
@@ -59,7 +84,15 @@ def append_log(rows: List[List[str]]):
     except Exception as e:
         logging.error(f"Failed to append log to {LOG_FILE}: {e}")
 
+def validate_environment_variables():
+    required_env_vars = ["HOLDINGS_JSON"]
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    if missing_vars:
+        logging.error(f"缺少必要的环境变量: {missing_vars}")
+        sys.exit(1)
+
 def main():
+    validate_environment_variables()
     if not CUR_FILE.is_file():
         logging.error("holdings.json not found")
         sys.exit(1)
