@@ -1,40 +1,25 @@
-name: 每日投资建议
-
-on:
-  schedule:
-    - cron: '50 23 * * *'     # UTC 23:50 = 北京 07:50
-  workflow_dispatch:
-
-jobs:
-  run-daily-push:
-    runs-on: ubuntu-latest
-    env:
-      SCKEY:                 ${{ secrets.SCKEY }}
-      QWEN_API_KEY:          ${{ secrets.QWEN_API_KEY }}
-      TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
-      NEWSAPI_KEY:           ${{ secrets.NEWSAPI_KEY }}
-      MEDIASTACK_KEY:        ${{ secrets.MEDIASTACK_KEY }}
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: 设置 Python
-        uses: actions/setup-python@v4
-        with: { python-version: "3.10" }
-
-      - name: 安装依赖
-        run: |
-          pip install requests pyyaml feedparser
-          pip install requests beautifulsoup4 lxml chardet sumy
-
-      - name: 抓取新闻
-        run: python fetch_news.py
-
-      - name: 上传新闻 JSON 作为 Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: news-json
-          path: news.json
-
-      - name: 生成并推送投资建议
-        run: python daily_push_qwen.py
+ name: Daily Briefing
+ on:
+   schedule:
+     - cron: '55 23 * * *'  # 07:55 CST
+ jobs:
+   run:
+     runs-on: ubuntu-latest
+     env:
+       TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+       ALPHA_KEY:     ${{ secrets.ALPHA_KEY }}
+       FINNHUB_KEY:   ${{ secrets.FINNHUB_KEY }}
+       JUHE_KEY:      ${{ secrets.JUHE_KEY }}
+       SCKEY:         ${{ secrets.SCKEY }}
+       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+       TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+       HOLDINGS_JSON: |
+         [{"symbol":"510880.SH","name":"中证红利ETF","weight":0.12},
+          {"symbol":"AAPL","name":"Apple Inc","weight":0.1}]
+     steps:
+       - uses: actions/checkout@v4
+       - uses: actions/setup-python@v5
+         with:
+           python-version: '3.11'
+       - run: pip install -r requirements.txt
+       - run: python news_pipeline.py --days 1 --max 40
