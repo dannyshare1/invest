@@ -15,9 +15,7 @@ jobs:
       TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
       QWEN_API_KEY:        ${{ secrets.QWEN_API_KEY }}   # ← daily_push_qwen.py 用
-      HOLDINGS_JSON: |
-        [{"symbol":"510880.SH","name":"中证红利ETF","weight":0.12},
-         {"symbol":"AAPL","name":"Apple Inc","weight":0.1}]
+     
     steps:
       - uses: actions/checkout@v4
 
