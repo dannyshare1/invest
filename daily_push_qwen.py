@@ -1,128 +1,108 @@
-import os, time, json, yaml, requests, textwrap
+# -*- coding: utf-8 -*-
+"""daily_push_qwen.py — 生成每日投资建议并推送
+
+替换旧版脚本，解决 NameError / Telegram 长度超限等问题。
+关键点
+———
+1. **动态持仓**：与 news_pipeline.py 共用 `HOLDINGS_JSON` / holdings.json。
+2. **调用通义千问 (Qwen)**：示例使用官方 ChatCompletion REST。
+3. **推送**：Server 酱 & Telegram；Telegram 自动分段 ≤ 4096 字。
+4. **文件依赖**：可引用 news_pipeline.py 产出的 `briefing.md` 作为市场新闻上下文。
+   如果文件不存在，自动跳过。
+
+依赖：
+    pip install httpx rich
+"""
+from __future__ import annotations
+import asyncio, os, json, pathlib, textwrap, typing as t
 from datetime import datetime
-from zoneinfo import ZoneInfo
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import httpx
+from rich import print as rprint
 
-# ——— 环境变量 ———
-SCKEY  = os.getenv("SCKEY")
-APIKEY = os.getenv("QWEN_API_KEY")
-if not SCKEY or not APIKEY:
-    raise ValueError("缺少 SCKEY 或 QWEN_API_KEY")
+# ─── 配置 ───
+QWEN_API = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+MODEL_NAME = "qwen-plus-v2"  # 亦可修改成你的付费模型
 
-# ——— Session ———
-session = requests.Session()
-session.mount("https://", HTTPAdapter(max_retries=Retry(total=0)))
+# ─── 数据加载 ───
 
-# ——— 日期 / 标题 ———
-bj_now = datetime.now(ZoneInfo("Asia/Shanghai"))
-today  = bj_now.date()
-date_str = bj_now.strftime("%Y年%m月%d日")
-weekday = "一二三四五六日"[bj_now.weekday()]
-title = f"📈 每日投资建议 · {date_str}"
-
-# ——— 读取持仓 ———
-import json, os, yaml, pathlib
-
-def load_holdings():
-    # 优先读环境变量
+def load_holdings() -> list[dict]:
     env = os.getenv("HOLDINGS_JSON")
     if env:
         return json.loads(env)
-
-    # 再找 holdings.json
     if pathlib.Path("holdings.json").is_file():
-        return json.loads(open("holdings.json", "r", encoding="utf-8").read())
+        return json.loads(pathlib.Path("holdings.json").read_text("utf-8"))
+    rprint("[yellow]⚠️  未找到持仓信息，默认为空 list")
+    return []
 
-    # 最后才尝试 holdings.yaml
-    return yaml.safe_load(open("holdings.yaml", "r", encoding="utf-8"))
+# ─── LLM 调用 ───
+async def call_qwen(prompt: str) -> str:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.getenv('QWEN_API_KEY')}",
+    }
+    payload = {
+        "model": MODEL_NAME,
+        "input": {"prompt": prompt},
+        "parameters": {"max_tokens": 800,
+                        "temperature": 0.7},
+    }
+    async with httpx.AsyncClient() as c:
+        r = await c.post(QWEN_API, json=payload, headers=headers, timeout=60)
+        r.raise_for_status()
+        return r.json()["output"]["text"].strip()
 
-holdings = load_holdings()
+# ─── 推送 ───
+async def push_serverchan(text: str):
+    key=os.getenv('SCKEY');
+    if not key: return
+    async with httpx.AsyncClient() as c:
+        await c.post(f'https://sctapi.ftqq.com/{key}.send',data={'text':'每日投资建议','desp':text},timeout=20)
 
-# ——— 仓位变动记录 ———
-last_path = "last_holdings.yaml"
-should_record = not os.path.exists(last_path) or holdings != yaml.safe_load(open(last_path,encoding="utf-8"))
-if should_record:
-    yaml.dump(holdings, open(last_path,"w",encoding="utf-8"), allow_unicode=True)
+async def push_telegram(text: str):
+    tok=os.getenv('TELEGRAM_BOT_TOKEN'); cid=os.getenv('TELEGRAM_CHAT_ID');
+    if not tok or not cid: return
+    chunks=[text[i:i+4000] for i in range(0,len(text),4000)]  # 4096-安全余量
+    async with httpx.AsyncClient() as c:
+        for ch in chunks:
+            await c.post(f'https://api.telegram.org/bot{tok}/sendMessage',
+                         data={'chat_id':cid,'text':ch,'parse_mode':'Markdown'},timeout=20)
 
-# ——— 读取新闻片段 ———
-news_snippets = ""
-if os.path.exists("news.json"):
-    with open("news.json", "r", encoding="utf-8") as nf:
-        for n in json.load(nf)[:8]:
-            line = f"- {n['title']}：{n['snippet']} ({n['source']} {n['published']})"
-            news_snippets += textwrap.shorten(line, 300, placeholder="…") + "\n"
+# ─── 主逻辑 ───
+async def main():
+    holds=load_holdings()
+    holdings_lines = "\n".join([f"- {h['name']} ({h['symbol']}): {h.get('weight',0)*100:.1f}%" for h in holds]) or "(空)"
 
-# ——— Prompt ———
-prompt = f"""
-你是专业投资策略分析师。请参考以下资料，同时全网搜索包括但不限于持仓相关行业的媒体观点：
-{news_snippets or '—今日抓取为空—'}
+    # 新闻上下文
+    news_ctx = ""
+    if pathlib.Path("briefing.md").is_file():
+        news_ctx = pathlib.Path("briefing.md").read_text("utf-8")
+        news_ctx = "\n\n## 市场新闻摘要 (近 1 日)\n" + news_ctx
 
-投资者（C5进取型）当前持仓：
-{holdings_lines}
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    prompt=textwrap.dedent(f"""
+        你是一名专业中国投资策略分析师，需要根据投资者(C5进取型)的当前持仓和市场新闻，总结今日(UTC {today})的投资建议。
 
-然后请输出：
-1. 关于最近一些市场热点的见解；
-2. 分析这些信息对持仓各资产的影响，并给出操作建议（维持/加仓/减仓/定投/止盈）；
-3. 如时机明确，请用「✅ 建议」或「⚠️ 风险」高亮；
-要求观点独到、剖析深入，避免流水账。
-"""
+        ### 当前持仓
+        {holdings_lines}
 
-# ——— 调用通义千问：MAX → PLUS 降级 ———
-api_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {APIKEY}"
-}
-payload_base = {
-    "input": {"prompt": prompt},
-    "parameters": {"result_format": "message"},
-    "workspace": "ilm-c9d12em00wxjtstn"   # ← 换成你的 workspace
-}
-models = ["qwen-plus", "qwen-max"]
-used_model, resp = None, None
+        {news_ctx}
 
-for model in models:
-    payload = payload_base | {"model": model}
-    for i in range(3):
-        try:
-            print(f"→ 调用 {model} 第 {i+1}/3 次")
-            resp = requests.post(api_url, headers=headers, json=payload,
-                                 timeout=(10, 90))
-            resp.raise_for_status()
-            used_model = model
-            break
-        except (requests.exceptions.Timeout,
-                requests.exceptions.ConnectionError) as e:
-            print(f"⚠️ {model} 第 {i+1} 次失败：{e}")
-            if i < 2:
-                time.sleep(2 ** i)
-    if used_model:
-        break
+        ### 输出格式(用 Markdown)：
+        1. **重点市场动态摘要**：3-5 条要点，覆盖相关行业。可引用上面新闻，但请用 own words 概括。
+        2. **操作建议**：针对持仓逐项给出"维持/加仓/减仓/调仓"并说明理由(≤50字/项)。
+        3. **可选**：适合定投的标的 & 近期风险提示。
+    """)
 
-if not used_model:
-    raise RuntimeError("❌ qwen-max 与 qwen-plus 均超时，放弃本次推送")
+    try:
+        answer = await call_qwen(prompt)
+    except Exception as e:
+        rprint(f"[red]LLM 调用失败：{e}")
+        return
 
-content = resp.json()["output"]["choices"][0]["message"]["content"].strip()
-content += f"\n\n—— 本报告由 **{used_model}** 模型生成"
+    # 推送
+    await push_serverchan(answer)
+    await push_telegram(answer)
+    rprint("[green]✅ 投资建议已推送")
 
-# ——— Server 酱推送 ———
-session.post(f"https://sctapi.ftqq.com/{SCKEY}.send",
-             data={"title": title, "desp": content}, timeout=10)
-
-# ——— Telegram 推送（可选） ———
-tg_token, tg_chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
-if tg_token and tg_chat:
-    session.post(f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                 json={"chat_id": tg_chat,
-                       "text": f"{title}\n\n{content}",
-                       "parse_mode": "Markdown"},
-                 timeout=10)
-
-# ——— 日志记录 ———
-os.makedirs("logs", exist_ok=True)
-with open(f"logs/{today.isoformat()}.md", "w", encoding="utf-8") as f:
-    f.write(f"# {title}\n\n{content}\n\n")
-    f.write("📌 持仓变动已记录。\n" if should_record else "📌 持仓未变动。\n")
-
-print("✅ 推送完成")
+if __name__ == "__main__":
+    asyncio.run(main())
