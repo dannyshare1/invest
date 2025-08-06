@@ -2,7 +2,7 @@
  on:
    schedule:
      - cron: '55 23 * * *'  # 07:55 CST
- workflow_dispatch:
+   workflow_dispatch:
  jobs:
    run:
      runs-on: ubuntu-latest
