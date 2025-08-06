@@ -1,64 +1,49 @@
 name: Daily Investment Push
-
 on:
   schedule:
-    # 每天北京时间 07:55（= UTC 前一天下午 23:55）
-    - cron: '55 23 * * *'
-  workflow_dispatch:   # 允许手动触发
+    - cron: '55 23 * * *'        # 北京时间 07:55
+  workflow_dispatch:
 
 jobs:
-  daily-push:
+  push:
     runs-on: ubuntu-latest
-    # 避免并发两次同时跑（例如手动触发撞 cron）
     concurrency:
       group: daily-push
       cancel-in-progress: false
 
     env:
-      # —— 运行环境变量 —— #
-      TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
-      ALPHA_KEY:     ${{ secrets.ALPHA_KEY }}
-      FINNHUB_KEY:   ${{ secrets.FINNHUB_KEY }}
-      JUHE_KEY:      ${{ secrets.JUHE_KEY }}
-
-      QWEN_API_KEY:  ${{ secrets.QWEN_API_KEY }}
-      SCKEY:         ${{ secrets.SCKEY }}          # Server 酱
+      TUSHARE_TOKEN:  ${{ secrets.TUSHARE_TOKEN }}
+      ALPHA_KEY:      ${{ secrets.ALPHA_KEY }}
+      FINNHUB_KEY:    ${{ secrets.FINNHUB_KEY }}
+      JUHE_KEY:       ${{ secrets.JUHE_KEY }}
+      QWEN_API_KEY:   ${{ secrets.QWEN_API_KEY }}
+      SCKEY:          ${{ secrets.SCKEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
 
-      # 如果想直接把持仓 JSON 塞环境变量，而不是文件：
-      # HOLDINGS_JSON: '[{"symbol":"515080.SH","name":"中证红利ETF","weight":0.12}, ...]'
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
-      # 1️⃣ 记录持仓变动
-      - name: Track holdings changes
+      - name: Track holdings
         run: python holdings_tracker.py
 
-      # 2️⃣ 拉取新闻并生成 briefing / news_today.json
-      - name: Aggregate market news
+      - name: Aggregate news
         run: python news_pipeline.py --days 1 --max 40
 
-      # 3️⃣ 生成投资建议并推送
-      - name: Generate & push daily advice
+      - name: Generate & push advice
         run: python daily_push_qwen.py
 
-      # 4️⃣ 上传日志供调试（保留 7 天，之后自动清理）
-      - name: Upload pipeline log
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-logs
+          name: pipeline-log
           path: pipeline.log
           retention-days: 7
