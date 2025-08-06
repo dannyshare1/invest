@@ -5,7 +5,6 @@ import datetime
 import pathlib
 import sys
 import logging
-import os  # 导入 os 模块
 from typing import List, Dict
 
 SNAPSHOT = pathlib.Path('holdings_snapshot.json')
@@ -59,15 +58,7 @@ def append_log(rows: List[List[str]]):
     except Exception as e:
         logging.error(f"Failed to append log to {LOG_FILE}: {e}")
 
-def validate_environment_variables():
-    required_env_vars = ["HOLDINGS_JSON"]
-    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-    if missing_vars:
-        logging.error(f"缺少必要的环境变量: {missing_vars}")
-        sys.exit(1)
-
 def main():
-    validate_environment_variables()
     if not CUR_FILE.is_file():
         logging.error("holdings.json not found")
         sys.exit(1)
