@@ -66,14 +66,14 @@ async def one_etf_names(ts_code:str)->list[str]:
     try:
         names=await ts_weight_names(code)
         if names: return names
-    except Exception as e:
-        ERR_LOG.write_text(f"{datetime.now(TZ)}  ETF {ts_code}  index_weight  {e}\n",append=True)
+    with ERR_LOG.open("a", encoding="utf-8") as f:
+        f.write(f"{datetime.now(TZ)}  ETF {h['symbol']} 无法获取重仓\n")
     # fallback 东财网页
     try:
         names=await eastmoney_web(code)
         if names: return names
-    except Exception as e:
-        ERR_LOG.write_text(f"{datetime.now(TZ)}  ETF {ts_code}  eastmoney  {e}\n",append=True)
+    with ERR_LOG.open("a", encoding="utf-8") as f:
+        f.write(f"{datetime.now(TZ)}  RSS {src}  {e}\n")
     return []
 
 async def build_keywords()->set[str]:
