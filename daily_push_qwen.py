@@ -44,11 +44,19 @@ def make_prompt(slot:str,holds,brief:str):
         3. 若有新的机会或风险，可另外列出
     """).strip()
 
-async def call_llm(prompt):
+# 只展示改动块，其余保持 v2 代码
+async def call_llm(prompt:str):
     hdr={"Content-Type":"application/json","Authorization":f"Bearer {os.getenv('QWEN_API_KEY')}"}
-    pl={"model":MODEL,"input":{"prompt":prompt},"parameters":{"max_tokens":800,"temperature":0.7}}
-    r=await httpx.AsyncClient().post(API,headers=hdr,json=pl,timeout=60)
-    r.raise_for_status(); return r.json()["output"]["text"].strip()
+    pl = {"model":MODEL,"input":{"prompt":prompt},"parameters":{"max_tokens":800,"temperature":0.7}}
+    for i in range(3):      # 最多 3 次退避
+        try:
+            r=await httpx.AsyncClient().post(API,headers=hdr,json=pl,timeout=60)
+            r.raise_for_status()
+            return r.json()["output"]["text"].strip()
+        except Exception as e:
+            logging.warning(f"LLM 调用失败({i+1}/3): {e}")
+            await asyncio.sleep(2**i)
+    raise RuntimeError("LLM 调用失败已重试 3 次")
 
 async def tg_send(text):
     tok,cid=os.getenv('TELEGRAM_BOT_TOKEN'),os.getenv('TELEGRAM_CHAT_ID')
