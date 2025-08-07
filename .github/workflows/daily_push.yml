@@ -28,14 +28,15 @@ jobs:
       - run: python news_pipeline.py          # 实时生成 briefing.md & news_all.csv
       - run: python daily_push_qwen.py        # 推提示 + briefing
 
-      - name: 上传 log
+      - name: Upload logs
         uses: actions/upload-artifact@v4
         with:
-          name: logs-and-history-最新
+          name: logs-and-history-latest
           path: |
             pipeline.log
             errors.log
-            news_all.csv
             keywords_used.txt
+            news_all.csv
+
 
           retention-days: 30
