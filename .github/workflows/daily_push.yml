@@ -1,25 +1,25 @@
-name: Daily Investment Push
+name: Intraday Advice
+
 on:
   schedule:
-    - cron: '55 23 * * *'        # 北京时间 07:55
+    # 北京时间 09:50 （UTC 01:50）
+    - cron: '50 1 * * 1-5'
+    # 11:20 （UTC 03:20）
+    - cron: '20 3 * * 1-5'
+    # 15:05 （UTC 07:05）
+    - cron: '5 7 * * 1-5'
   workflow_dispatch:
 
 jobs:
-  push:
+  intraday:
     runs-on: ubuntu-latest
-    concurrency:
-      group: daily-push
-      cancel-in-progress: false
-
     env:
-      TUSHARE_TOKEN:  ${{ secrets.TUSHARE_TOKEN }}
-      ALPHA_KEY:      ${{ secrets.ALPHA_KEY }}
-      FINNHUB_KEY:    ${{ secrets.FINNHUB_KEY }}
-      JUHE_KEY:       ${{ secrets.JUHE_KEY }}
-      QWEN_API_KEY:   ${{ secrets.QWEN_API_KEY }}
-      SCKEY:          ${{ secrets.SCKEY }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+      TUSHARE_TOKEN:     ${{ secrets.TUSHARE_TOKEN }}
+      JUHE_KEY:          ${{ secrets.JUHE_KEY }}
+      QWEN_API_KEY:      ${{ secrets.QWEN_API_KEY }}
+      SCKEY:             ${{ secrets.SCKEY }}
+      TELEGRAM_BOT_TOKEN:${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - uses: actions/checkout@v4
@@ -31,36 +31,37 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Track holdings
-        run: python holdings_tracker.py
+      # 1. 持仓记录
+      - run: python holdings_tracker.py
 
-      - name: Aggregate news
-        run: python news_pipeline.py --days 1 --max 40
+      # 2. 聚合新闻（早/午/收盘都跑一次，反正抓当天最新）
+      - run: python news_pipeline.py --days 1 --max 40
 
-      - name: Generate & push advice
-        run: python daily_push_qwen.py
+      # 3. 推送提示
+      - name: Morning prompt
+        if: github.event.schedule == '50 1 * * 1-5'
+        run: |
+          export PROMPT_VARIANT=morning
+          python daily_push_qwen.py
 
-      - name: Upload logs
+      - name: Noon prompt
+        if: github.event.schedule == '20 3 * * 1-5'
+        run: |
+          export PROMPT_VARIANT=noon
+          python daily_push_qwen.py
+
+      - name: Close prompt
+        if: github.event.schedule == '5 7 * * 1-5'
+        run: |
+          export PROMPT_VARIANT=close
+          python daily_push_qwen.py
+
+      # 上传日志 & 历史文件
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: pipeline-log
-          path: pipeline.log
-          retention-days: 7
-          
-      - name: Upload holdings log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: holdings-log
-          path: holdings_log.csv
-          retention-days: 7
-
-      - name: Upload holdings history
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: holdings-history
-          path: holdings_history.csv
+          name: logs-and-history
+          path: |
+            pipeline.log
+            holdings_history.csv
           retention-days: 30
-
