@@ -29,21 +29,33 @@ logging.basicConfig(level=logging.INFO,
     handlers=[logging.FileHandler("pipeline.log","a","utf-8"),
               logging.StreamHandler()])
 ERR = Path("errors.log"); ERR.touch(exist_ok=True)
-def logerr(msg:str):
+# 原来的 logerr() 中 Path.write_text(..., append=False) 会报错
+def logerr(msg: str):
     logging.error(msg)
-    ERR.write_text(f"{NOW}  {msg}\n", append=False) if hasattr(Path,"write_text") else \
-        ERR.open("a",encoding="utf-8").write(f"{NOW}  {msg}\n")
+    with ERR.open("a", encoding="utf-8") as f:     # 统一用 open("a")
+        f.write(f"{datetime.now(TZ)}  {msg}\n")
+
 
 def strip(x:str)->str: return re.sub(r"<[^>]+>","",html.unescape(x or "")).strip()
 def row(n): return [n['time'],n['src'],n['title'],n['summary'],n['url']]
 
 # ── 1. ETF 成分股 ──────────────────────────────────────
-async def push2_top10(ts_code:str)->list[str]:
-    code,ex=ts_code.split("."); secid=("1" if ex.startswith("SH") else "0")+f".{code}"
-    url=f"https://push2.eastmoney.com/api/qt/etf/top10?secid={secid}&pn=10&type=weight"
-    r=await httpx.AsyncClient().get(url,headers=UA,timeout=15)
-    js=r.json()
-    return [d['name'] for d in js.get('data',{}).get('weightList',[])]
+async def push2_top10(ts_code: str) -> list[str]:
+    code, ex = ts_code.split(".")
+    secid = ("1" if ex.startswith("SH") else "0") + f".{code}"
+    url = (f"https://push2.eastmoney.com/api/qt/etf/top10?"
+           f"secid={secid}&pn=10&type=weight")
+    r = await httpx.AsyncClient().get(url, headers=UA, timeout=15)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    # push2 有时返回 “var({})” 或空白，先做简单校验
+    try:
+        js = r.json()
+    except Exception:
+        raise RuntimeError("JSON decode fail")
+    data = js.get("data") or {}
+    return [d["name"] for d in data.get("weightList", [])]
+
 
 async def f10_top10(ts_code:str)->list[str]:
     code=ts_code.split(".")[0]
@@ -75,14 +87,18 @@ async def ts_top10(ts_code:str)->list[str]:
             return [n for _,n in js.get("data",{}).get("items",[])]
     return []
 
-async def etf_names(ts_code:str)->list[str]:
-    for fn in (push2_top10,f10_top10,ts_top10):
+async def etf_names(ts_code: str) -> list[str]:
+    for fn in (push2_top10, f10_top10, ts_top10):
         try:
-            names=await fn(ts_code)
-            if names: return names
+            names = await fn(ts_code)
+            if names:
+                return names
         except Exception as e:
+            # 把异常写入错误日志，继续尝试下一个源
             logerr(f"{ts_code} {fn.__name__} {e}")
-    logerr(f"{ts_code} 所有源均失败"); return []
+    logerr(f"{ts_code} 所有源均失败")
+    return []
+
 
 async def build_kw()->set[str]:
     fp=Path("holdings.json")
