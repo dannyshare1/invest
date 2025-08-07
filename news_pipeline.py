@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py — 聚合+摘要版（fix 2025-08-07）
-• 修正 Tushare 请求行格式化语法
-• 函数名统一 parse_holdings
+news_pipeline.py — 聚合+摘要 r6  (2025-08-07)
+改动要点
+1.  `import sys` → 解决 NameError
+2.  检索关键词写入日志：Tushare 日期段、AlphaVantage tickers、每条 RSS 源名
+3.  briefing.md 里：标题与摘要分行显示
+4.  额外空值保护，避免  'NoneType' object has no attribute ...'
 """
 from __future__ import annotations
-import argparse, asyncio, json, os, random, re, logging, html
-import sys
+import argparse, asyncio, json, os, random, re, logging, html, sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from hashlib import md5
@@ -58,19 +60,17 @@ class Fetcher:
     sem=asyncio.Semaphore(1)
     def __init__(s,c): s.c=c; s.tk=os.getenv('TUSHARE_TOKEN'); s.ak=os.getenv('ALPHA_KEY'); s.fk=os.getenv('FINNHUB_KEY')
 
-    async def tushare(s,st,ed):
-        cache=Path(f"tushare_{st.strftime('%Y%m%d')}.json")
+    async def tushare(s,st,ed,kw_log:list):
+        kw_log.append(f"Tushare src=eastmoney {st:%Y%m%d}-{ed:%Y%m%d}")
+        cache=Path(f"tushare_{st:%Y%m%d}.json")
         if cache.is_file():
             logging.info("Tushare 缓存"); return [NewsItem(**d) for d in json.loads(cache.read_text('utf-8'))]
         if not s.tk: return []
-        p={"api_name":"news",
-           "token":s.tk,
-           "params":{"src":"eastmoney",
-                     "start_date":st.strftime('%Y%m%d'),
-                     "end_date":ed.strftime('%Y%m%d')},
+        p={"api_name":"news","token":s.tk,
+           "params":{"src":"eastmoney","start_date":st.strftime('%Y%m%d'),"end_date":ed.strftime('%Y%m%d')},
            "fields":"title,content,url,datetime,src"}
         r=await s.c.post('https://api.tushare.pro',json=p,timeout=30)
-        js=r.json()
+        js=r.json() if r.content else {}
         if js.get('code'):
             logging.warning(f"Tushare code {js.get('code')}: {js.get('msg')}"); return []
         items=js.get('data',{}).get('items',[]) or []
@@ -80,24 +80,29 @@ class Fetcher:
         logging.info(f"Tushare 获取 {len(out)}")
         return out
 
-    async def alpha(s,tks):
+    async def alpha(s,tks,kw_log:list):
         if not s.ak or not tks: return []
+        kw_log.append(f"AlphaVantage tickers={','.join(tks)}")
         r=await s.c.get('https://www.alphavantage.co/query',
                         params={'function':'NEWS_SENTIMENT','tickers':','.join(tks[:100]),'apikey':s.ak},timeout=20)
-        feed=r.json().get('feed') or []
-        return [NewsItem(it['title'],make_digest(it['summary'] or it['title']),it['url'],
-                         it['time_published'],it.get('source','AV'),
+        try: feed=r.json().get('feed') or []
+        except Exception:
+            feed=[]
+        return [NewsItem(it.get('title',''),make_digest(it.get('summary','') or it.get('title','')),it.get('url',''),
+                         it.get('time_published',datetime.utcnow().isoformat()),it.get('source','AV'),
                          float(it.get('overall_sentiment_score',0)),[]) for it in feed]
 
-    async def juhe(s):
-        jk=os.getenv('JUHE_KEY')
+    async def juhe(s,kw_log:list):
+        jk=os.getenv('JUHE_KEY'); 
         if not jk: return []
+        kw_log.append("Juhe Toutiao type=caijing")
         r=await s.c.get('https://v.juhe.cn/toutiao/index',params={'type':'caijing','key':jk},timeout=20)
         data=r.json().get('result',{}).get('data',[]) if r.status_code==200 else []
         return [NewsItem(d['title'],make_digest(d['title']),d['url'],d['date'],
                          '聚合财经',naive_sent(d['title']),[]) for d in data]
 
-    async def rss(s,url,src):
+    async def rss(s,url,src,kw_log:list):
+        kw_log.append(f"RSS {src}")
         async with s.sem:
             await asyncio.sleep(random.uniform(1,2))
             try:
@@ -127,28 +132,34 @@ def rel(n,holds):
 
 async def collect(holds,days,limit):
     st=datetime.utcnow()-timedelta(days=days); ed=datetime.utcnow()
+    keywords_log=[]
     async with httpx.AsyncClient(timeout=30) as cli:
         f=Fetcher(cli)
-        tasks=[retry(f.tushare,st,ed), retry(f.juhe)]
+        tasks=[retry(f.tushare,st,ed,keywords_log), retry(f.juhe,keywords_log)]
         ovs=[h.symbol for h in holds if not h.is_cn and '.' not in h.symbol]
-        if ovs: tasks.append(retry(f.alpha,ovs))
+        if ovs: tasks.append(retry(f.alpha,ovs,keywords_log))
         rss=[('https://rsshub.app/21jingji/channel/stock','21财经'),
              ('https://rsshub.app/caixin/latest','财新'),
              ('https://rsshub.app/stcn/news','证券时报'),
              ('https://rss.sina.com.cn/roll/finance/hot_roll.xml','新浪财经'),
              ('https://a.jiemian.com/index.php?m=article&a=rss','界面新闻'),
              ('https://rsshub.app/cls/telegraph','财联社')]
-        for u,s in rss: tasks.append(retry(f.rss,u,s))
+        for u,s in rss: tasks.append(retry(f.rss,u,s,keywords_log))
         res=await asyncio.gather(*tasks,return_exceptions=True)
+    for kw in keywords_log:
+        logging.info(f"KW: {kw}")
     pool={}
     for r in res:
         if isinstance(r,Exception): logging.error(r); continue
         for it in r: pool[it.fp()]=it
     return sorted(pool.values(),key=lambda x:rel(x,holds),reverse=True)[:limit]
 
+# ── 输出 & 推送 ──
 def write(items):
     Path('news_today.json').write_text(json.dumps([asdict(i) for i in items],ensure_ascii=False,indent=2),'utf-8')
-    brief="今日重点财经新闻\n"+'\n'.join(f"{i+1}. {it.title} — {it.summary}" for i,it in enumerate(items))
+    brief="今日重点财经新闻"
+    for i,it in enumerate(items,1):
+        brief+=f"\n{i}. {it.title}\n   {it.summary}"
     Path('briefing.md').write_text(brief,'utf-8'); return brief
 
 def esc(x): return x.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
