@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py — r9
-• 修正 as_completed 迭代错误
-• 逻辑其他保持 r8
+news_pipeline.py — r10 (fix async-generator issue)
+• async generators → wrapped into awaitables
+• 逻辑保持 r9：全部新闻写 news_all.csv、详细异常日志
 """
 from __future__ import annotations
 import asyncio, json, os, random, re, logging, html, sys, csv
@@ -18,13 +18,12 @@ logging.basicConfig(level=logging.INFO,
                               logging.StreamHandler(sys.stdout)])
 
 _SENT=re.compile(r"(利好|上涨|飙升|反弹|大涨|收涨|upbeat|bullish|positive|利空|下跌|暴跌|收跌|bearish|negative)",re.I)
-def sent(t): return max(min(len(_SENT.findall(t))*0.1,1.0),-1.0)
-def strip(x): return re.sub(r"<[^>]+>","",html.unescape(x))
 def digest(txt,l=180):
-    txt=strip(txt).strip(); out=[]
-    for s in re.split(r"[。.!！？\n]",txt):
-        s=s.strip()
-        if s: out.append(s)
+    txt=re.sub(r"<[^>]+>","",html.unescape(txt)).strip()
+    parts=[s.strip() for s in re.split(r"[。.!！？\n]",txt) if s.strip()]
+    out=[]
+    for s in parts:
+        out.append(s)
         if len("".join(out))>=l or len(out)>=3: break
     return "。".join(out)[:l]
 
@@ -43,7 +42,7 @@ class Fetcher:
                   "params":{"src":"eastmoney","start_date":st.strftime('%Y%m%d'),"end_date":ed.strftime('%Y%m%d')},
                   "fields":"title,content,url,datetime,src"}
             r=await s.c.post('https://api.tushare.pro',json=body,timeout=30)
-            for t,con,url,dt,src in (r.json().get('data',{}).get('items',[]) or []):
+            for t,con,url,dt,src in r.json().get('data',{}).get('items',[]) or []:
                 yield NewsItem(t,digest(con),url,dtparse.parse(dt).isoformat(),src)
         except Exception: logging.exception("Tushare error")
     async def juhe(s,kw):
@@ -73,27 +72,33 @@ class Fetcher:
                 await asyncio.sleep(random.uniform(5,6))
             except Exception: logging.exception(f"{src} error")
 
+async def wrap(gen):
+    """Collect async-generator into list."""
+    return [item async for item in gen]
+
 async def collect():
     st=datetime.utcnow()-timedelta(days=1); ed=datetime.utcnow()
     kw_log=[]; items=[]
     async with httpx.AsyncClient(timeout=30) as cli:
         f=Fetcher(cli)
-        coros=[f.tushare(st,ed,kw_log), f.juhe(kw_log),
-               f.rss('https://rsshub.app/cls/telegraph','财联社',kw_log),
-               f.rss('https://rss.sina.com.cn/roll/finance/hot_roll.xml','新浪财经',kw_log)]
-        for fut in asyncio.as_completed(coros):
-            try:
-                async for n in await fut:
-                    items.append(n)
-            except Exception: pass
+        tasks=[
+            wrap(f.tushare(st,ed,kw_log)),
+            wrap(f.juhe(kw_log)),
+            wrap(f.rss('https://rsshub.app/cls/telegraph','财联社',kw_log)),
+            wrap(f.rss('https://rss.sina.com.cn/roll/finance/hot_roll.xml','新浪财经',kw_log))
+        ]
+        results=await asyncio.gather(*tasks,return_exceptions=True)
+        for res in results:
+            if isinstance(res,Exception):
+                logging.error(res); continue
+            items.extend(res)
     Path('keywords_used.txt').write_text("\n".join(kw_log),'utf-8')
     return items
 
 def write(items:list[NewsItem]):
     Path('news_today.json').write_text(json.dumps([asdict(i) for i in items],ensure_ascii=False,indent=2),'utf-8')
     with Path('news_all.csv').open('w',newline='',encoding='utf-8-sig') as f:
-        w=csv.writer(f); w.writerow(['time','source','title','summary','url'])
-        w.writerows([n.to_csv() for n in items])
+        csv.writer(f).writerows([['time','source','title','summary','url'],*map(lambda n:n.to_csv(),items)])
     brief="今日重点财经新闻"
     for i,n in enumerate(items,1):
         brief+=f"\n{i}. {n.title}\n   {n.summary}"
