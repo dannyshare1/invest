@@ -4,3 +4,4 @@ rich
 openai
 pyyaml
 requests
+beautifulsoup4
