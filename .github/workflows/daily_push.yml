@@ -28,13 +28,14 @@ jobs:
       - run: python news_pipeline.py          # 实时生成 briefing.md & news_all.csv
       - run: python daily_push_qwen.py        # 推提示 + briefing
 
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - name: 上传 log
+        uses: actions/upload-artifact@v4
         with:
-          name: logs-and-history-${{ github.run_number }}
+          name: logs-and-history-最新
           path: |
             pipeline.log
-            holdings_history.csv
-            keywords_used.txt
+            errors.log
             news_all.csv
+            keywords_used.txt
+
           retention-days: 30
