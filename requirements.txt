@@ -5,3 +5,4 @@ openai
 pyyaml
 requests
 beautifulsoup4
+lxml
