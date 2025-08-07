@@ -47,3 +47,12 @@ jobs:
           name: pipeline-log
           path: pipeline.log
           retention-days: 7
+          
+      - name: Upload holdings log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: holdings-log
+          path: holdings_log.csv
+          retention-days: 7
+
