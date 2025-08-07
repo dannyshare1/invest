@@ -1,25 +1,23 @@
-name: Intraday Advice
+name: A-share Intraday Advice
 
 on:
+  # 北京时间 09:50 / 11:20 / 15:05
   schedule:
-    # 北京时间 09:50 （UTC 01:50）
     - cron: '50 1 * * 1-5'
-    # 11:20 （UTC 03:20）
     - cron: '20 3 * * 1-5'
-    # 15:05 （UTC 07:05）
     - cron: '5 7 * * 1-5'
   workflow_dispatch:
 
 jobs:
-  intraday:
+  push:
     runs-on: ubuntu-latest
     env:
-      TUSHARE_TOKEN:     ${{ secrets.TUSHARE_TOKEN }}
-      JUHE_KEY:          ${{ secrets.JUHE_KEY }}
-      QWEN_API_KEY:      ${{ secrets.QWEN_API_KEY }}
-      SCKEY:             ${{ secrets.SCKEY }}
+      TUSHARE_TOKEN:      ${{ secrets.TUSHARE_TOKEN }}
+      JUHE_KEY:           ${{ secrets.JUHE_KEY }}
+      QWEN_API_KEY:       ${{ secrets.QWEN_API_KEY }}
+      SCKEY:              ${{ secrets.SCKEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - uses: actions/checkout@v4
@@ -31,37 +29,17 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # 1. 持仓记录
       - run: python holdings_tracker.py
+      - run: python news_pipeline.py   # 每次都刷新 briefing.md
+      - run: python daily_push_qwen.py
 
-      # 2. 聚合新闻（早/午/收盘都跑一次，反正抓当天最新）
-      - run: python news_pipeline.py --days 1 --max 40
-
-      # 3. 推送提示
-      - name: Morning prompt
-        if: github.event.schedule == '50 1 * * 1-5'
-        run: |
-          export PROMPT_VARIANT=morning
-          python daily_push_qwen.py
-
-      - name: Noon prompt
-        if: github.event.schedule == '20 3 * * 1-5'
-        run: |
-          export PROMPT_VARIANT=noon
-          python daily_push_qwen.py
-
-      - name: Close prompt
-        if: github.event.schedule == '5 7 * * 1-5'
-        run: |
-          export PROMPT_VARIANT=close
-          python daily_push_qwen.py
-
-      # 上传日志 & 历史文件
-      - uses: actions/upload-artifact@v4
+      - name: Upload logs & history
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: logs-and-history
+          name: logs-and-history-${{ github.run_number }}
           path: |
             pipeline.log
             holdings_history.csv
+            keywords_used.txt
           retention-days: 30
