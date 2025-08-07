@@ -29,10 +29,10 @@ logging.basicConfig(level=logging.INFO,
     handlers=[logging.FileHandler("pipeline.log","a","utf-8"),
               logging.StreamHandler()])
 ERR = Path("errors.log"); ERR.touch(exist_ok=True)
-# 原来的 logerr() 中 Path.write_text(..., append=False) 会报错
+# ─── logerr（替换整段） ─────────────────────────
 def logerr(msg: str):
     logging.error(msg)
-    with ERR.open("a", encoding="utf-8") as f:     # 统一用 open("a")
+    with ERR.open("a", encoding="utf-8") as f:
         f.write(f"{datetime.now(TZ)}  {msg}\n")
 
 
@@ -57,15 +57,30 @@ async def push2_top10(ts_code: str) -> list[str]:
     return [d["name"] for d in data.get("weightList", [])]
 
 
-async def f10_top10(ts_code:str)->list[str]:
-    code=ts_code.split(".")[0]
-    url=(f"https://fundf10.eastmoney.com/"
-         f"FundArchivesDatas.aspx?type=jjcc&code={code}&topline=10")
-    r=await httpx.AsyncClient().get(url,headers=UA,timeout=15)
-    m=re.search(r'var apidata=\{ content:"(.+?)"\}',r.text)
-    if not m: return []
-    table=BeautifulSoup(html.unescape(m.group(1)),"lxml")
-    return [td.get_text(strip=True) for td in table.select("td")[:10]]
+# ─── f10_top10（替换整段）───────────────────────
+async def f10_top10(ts_code: str) -> list[str]:
+    """
+    Eastmoney F10: FundArchivesDatas.aspx?type=jjcc
+    返回 6 列循环：代码 / 名称 / 占比 / 持股数 / 市值 / 变动
+    我们只要‘名称’ → 索引 % 6 == 1
+    """
+    code = ts_code.split(".")[0]
+    url = (f"https://fundf10.eastmoney.com/"
+           f"FundArchivesDatas.aspx?type=jjcc&code={code}&topline=10")
+    r = await httpx.AsyncClient().get(url, headers=UA, timeout=15)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+
+    m = re.search(r'var apidata=\{ content:"(.+?)"\}', r.text)
+    if not m:
+        raise RuntimeError("apidata not found")
+
+    html_table = html.unescape(m.group(1))
+    soup = BeautifulSoup(html_table, "lxml")
+    tds = [td.get_text(strip=True) for td in soup.select("td")]
+    # 取“名称列”
+    names = [v for idx, v in enumerate(tds) if idx % 6 == 1][:10]
+    return names
 
 async def ts_top10(ts_code:str)->list[str]:
     if not TOKEN: return []
