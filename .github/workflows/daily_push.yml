@@ -1,11 +1,10 @@
 name: A-share Intraday Advice
 
 on:
-  # 北京时间 09:50 / 11:20 / 15:05
   schedule:
-    - cron: '50 1 * * 1-5'
-    - cron: '20 3 * * 1-5'
-    - cron: '5 7 * * 1-5'
+    - cron: '50 1 * * 1-5'   # 09:50
+    - cron: '20 3 * * 1-5'   # 11:20
+    - cron: '5 7 * * 1-5'    # 15:05
   workflow_dispatch:
 
 jobs:
@@ -21,25 +20,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
+        with: { python-version: '3.11', cache: 'pip' }
       - run: pip install -r requirements.txt
 
       - run: python holdings_tracker.py
-      - run: python news_pipeline.py   # 每次都刷新 briefing.md
-      - run: python daily_push_qwen.py
+      - run: python news_pipeline.py          # 实时生成 briefing.md & news_all.csv
+      - run: python daily_push_qwen.py        # 推提示 + briefing
 
-      - name: Upload logs & history
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: logs-and-history-${{ github.run_number }}
           path: |
             pipeline.log
             holdings_history.csv
             keywords_used.txt
+            news_all.csv
           retention-days: 30
