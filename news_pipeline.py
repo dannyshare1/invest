@@ -1,14 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py — r8 (full list, better logging)
+news_pipeline.py — r9
+• 修正 as_completed 迭代错误
+• 逻辑其他保持 r8
 """
 from __future__ import annotations
-import argparse, asyncio, json, os, random, re, logging, html, sys, csv
+import asyncio, json, os, random, re, logging, html, sys, csv
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 import httpx
 from dateutil import parser as dtparse
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[logging.FileHandler('pipeline.log','a'),
+                              logging.StreamHandler(sys.stdout)])
 
 _SENT=re.compile(r"(利好|上涨|飙升|反弹|大涨|收涨|upbeat|bullish|positive|利空|下跌|暴跌|收跌|bearish|negative)",re.I)
 def sent(t): return max(min(len(_SENT.findall(t))*0.1,1.0),-1.0)
@@ -36,8 +43,7 @@ class Fetcher:
                   "params":{"src":"eastmoney","start_date":st.strftime('%Y%m%d'),"end_date":ed.strftime('%Y%m%d')},
                   "fields":"title,content,url,datetime,src"}
             r=await s.c.post('https://api.tushare.pro',json=body,timeout=30)
-            js=r.json()
-            for t,con,url,dt,src in js.get('data',{}).get('items',[]) or []:
+            for t,con,url,dt,src in (r.json().get('data',{}).get('items',[]) or []):
                 yield NewsItem(t,digest(con),url,dtparse.parse(dt).isoformat(),src)
         except Exception: logging.exception("Tushare error")
     async def juhe(s,kw):
@@ -72,12 +78,12 @@ async def collect():
     kw_log=[]; items=[]
     async with httpx.AsyncClient(timeout=30) as cli:
         f=Fetcher(cli)
-        tasks=[f.tushare(st,ed,kw_log), f.juhe(kw_log),
+        coros=[f.tushare(st,ed,kw_log), f.juhe(kw_log),
                f.rss('https://rsshub.app/cls/telegraph','财联社',kw_log),
                f.rss('https://rss.sina.com.cn/roll/finance/hot_roll.xml','新浪财经',kw_log)]
-        async for coro in asyncio.as_completed(tasks):
+        for fut in asyncio.as_completed(coros):
             try:
-                async for n in await coro:
+                async for n in await fut:
                     items.append(n)
             except Exception: pass
     Path('keywords_used.txt').write_text("\n".join(kw_log),'utf-8')
@@ -85,7 +91,6 @@ async def collect():
 
 def write(items:list[NewsItem]):
     Path('news_today.json').write_text(json.dumps([asdict(i) for i in items],ensure_ascii=False,indent=2),'utf-8')
-    # CSV for artifact
     with Path('news_all.csv').open('w',newline='',encoding='utf-8-sig') as f:
         w=csv.writer(f); w.writerow(['time','source','title','summary','url'])
         w.writerows([n.to_csv() for n in items])
@@ -100,6 +105,4 @@ def main():
     logging.info(f"news collected {len(items)} items")
 
 if __name__=='__main__':
-    logging.basicConfig(level=logging.INFO,format='%(asctime)s - %(levelname)s - %(message)s',
-                        handlers=[logging.FileHandler('pipeline.log','a'),logging.StreamHandler(sys.stdout)])
     main()
