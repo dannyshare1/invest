@@ -6,6 +6,7 @@ news_pipeline.py — 聚合+摘要版（fix 2025-08-07）
 """
 from __future__ import annotations
 import argparse, asyncio, json, os, random, re, logging, html
+import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from hashlib import md5
