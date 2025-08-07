@@ -35,37 +35,43 @@ def strip(x:str)->str:
 
 def row(n:dict): return [n["time"],n["src"],n["title"],n["summary"],n["url"]]
 
-# ---------- 获取 ETF 前10 成份股中文名 ----------
-async def top10_names(etf_code:str)->list[str]:
-    if not TOKEN: return []
-    cli=httpx.AsyncClient(timeout=20)
-    # 1) index_weight
-    payload={"api_name":"index_weight","token":TOKEN,
-             "params":{"index_code": etf_code.split(".")[0]+".CI","trade_date":TODAY},
-             "fields":"con_code,weight"}
-    js=(await cli.post("https://api.tushare.pro",json=payload)).json()
-    items=js.get("data",{}).get("items",[]) if not js.get("code") else []
-    codes=[c for c,_ in items[:10]]
-    if not codes: return []
-    # 2) stock_basic to name
-    payload={"api_name":"stock_basic","token":TOKEN,
-             "params":{"ts_code":",".join(codes)},"fields":"ts_code,name"}
-    js=(await cli.post("https://api.tushare.pro",json=payload)).json()
-    names=[n for _,n in js.get("data",{}).get("items",[])]
-    return names
+async def top10_names(code: str) -> list[str]:
+    """
+    先试东财 push2 接口，失败再用 Tushare index_weight。
+    返回中文简称列表（最多 10 个）。
+    """
+    sym = code.split(".")[0]   # 6 位数字
+    url = f"https://push2.eastmoney.com/api/qt/etf/top10?&symbol={sym}.SH"
+    try:
+        r = await httpx.AsyncClient().get(url, timeout=20)
+        js = r.json()
+        if js.get("data") and js["data"].get("stockinfo"):
+            return [it["name"] for it in js["data"]["stockinfo"][:10]]
+    except Exception as e:
+        logging.warning(f"东财 top10 {code} 失败: {e}")
 
-async def build_keywords()->set[str]:
-    fp=Path("holdings.json")
-    if not fp.is_file(): return set()
-    holds=json.loads(fp.read_text("utf-8"))
-    kws=set()
-    for h in holds:
-        try:
-            kws.update(await top10_names(h["symbol"]))
-        except Exception as e:
-            logging.warning(f"top10 {h['symbol']} err {e}")
-    Path("keywords_used.txt").write_text("\n".join(sorted(kws)),"utf-8")
-    return kws
+    # --- 兜底用 Tushare index_weight ---
+    if not TOKEN:
+        return []
+    payload = {"api_name": "index_weight", "token": TOKEN,
+               "params": {"index_code": sym + ".CI", "trade_date": TODAY},
+               "fields": "con_code,weight"}
+    try:
+        r = await httpx.AsyncClient().post("https://api.tushare.pro", json=payload, timeout=20)
+        js = r.json()
+        items = js.get("data", {}).get("items", []) if not js.get("code") else []
+        codes = [c for c, _ in items[:10]]
+        if not codes:
+            return []
+        # 转中文名
+        payload = {"api_name": "stock_basic", "token": TOKEN,
+                   "params": {"ts_code": ",".join(codes)}, "fields": "ts_code,name"}
+        js = (await httpx.AsyncClient().post("https://api.tushare.pro", json=payload, timeout=20)).json()
+        return [n for _, n in js.get("data", {}).get("items", [])]
+    except Exception as e:
+        logging.warning(f"Tushare top10 {code} 失败: {e}")
+        return []
+
 
 # ---------- tushare 网页 & API ----------
 async def ts_web(tag)->list[dict]:
