@@ -18,8 +18,7 @@ jobs:
       SCKEY: ${{ secrets.SCKEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      # 采集器可选项
-      USE_GOOGLE: "0"        # 默认关Google。如需开，改为 "1"
+      USE_GOOGLE: "0"   # 默认关 Google；需要时设为 "1"
 
     steps:
       - name: Checkout
@@ -37,12 +36,8 @@ jobs:
 
       - name: Show holdings
         run: |
-          echo "holdings.json content (masked weights):"
-          python - << 'PY'
-import json, pathlib
-p=pathlib.Path('holdings.json')
-print(p.read_text('utf-8') if p.is_file() else 'holdings.json not found')
-PY
+          echo "holdings.json present? $([ -f holdings.json ] && echo yes || echo no)"
+          python -c "import json, pathlib; p=pathlib.Path('holdings.json'); print(p.read_text('utf-8') if p.is_file() else 'holdings.json not found')"
 
       - name: Run collector (news_pipeline.py)
         run: python news_pipeline.py
@@ -51,8 +46,8 @@ PY
         run: python daily_push_qwen.py
 
       - name: Upload artifacts (outputs + logs)
-        uses: actions/upload-artifact@v4
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: news-artifacts
           if-no-files-found: ignore
