@@ -1,293 +1,386 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py — Google 新闻聚合 + 持仓驱动关键词（Qwen 生成），带完整错误日志
-
-你将得到：
-- news_all.csv         # 全量新闻（不去重）
-- briefing.txt         # 简要摘要：标题 + 摘要分行
-- keywords_used.txt    # 本轮实际用到的关键词（含 LLM 生成）
-- sources_used.txt     # 实际访问过的源与 URL
-- errors.log           # 详细错误日志（永不空写，会在 0 条时也写明原因）
-
-环境变量（可选）：
-- QWEN_API_KEY         # 生成关键词（2-4 个汉字），如果没有也行，会只用 ETF 名称的切词备选
-- TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / SCKEY  # 与本脚本无关，这里不推送
+news_pipeline.py — 基于 Google News + 聚合数据 的资讯收集器
+要点
+----
+1) 不再调用 TuShare 的资讯/成分股接口。
+2) 关键词来源：仅用你的 holdings.json 的“名称” + LLM(Qwen)补充短关键词（≤4字，中文优先）。
+3) 新闻来源：
+   - Google News RSS: https://news.google.com/rss/search?q=<query>
+   - 聚合数据(可选): http://apis.juhe.cn/fapigx/caijing/query?k=<关键词>|<关键词>...
+4) 先抓链接，再抓 **正文**（BeautifulSoup 提取 <p> 文本），用 OR 逻辑匹配关键词；命中的才写入。
+5) 详细错误写入 errors.log；本轮使用过的关键词写入 keywords_used.txt；来源写入 sources_used.txt。
+6) 输出：
+   - news_all.csv（所有抓到且命中的新闻）
+   - briefing.txt（简单汇总）
+运行
+----
+pip install -r requirements.txt
+python news_pipeline.py --days 3 --limit 400
+需要环境变量：
+    QWEN_API_KEY=...
+    JUHE_KEY=...  # 聚合数据可留空；留空则跳过
 """
-
 from __future__ import annotations
-import asyncio, os, json, csv, html, re, traceback
-from pathlib import Path
+import os, re, sys, csv, json, asyncio, traceback, time
 from datetime import datetime, timedelta, timezone
-from dateutil import tz
-import httpx
+from pathlib import Path
+from typing import List, Dict, Any, Tuple
+import httpx, feedparser
 from bs4 import BeautifulSoup
-import feedparser
-from urllib.parse import quote, urlparse
+from dateutil import parser as dtparse
+from charset_normalizer import from_bytes
 from rich import print as rprint
 
-# ───────── 路径 & 常量 ─────────
-TZ = tz.gettz("Asia/Shanghai")
-NOW_ISO = datetime.now(TZ).isoformat()
-OUT_DIR = Path(".")
-OUT_CSV = OUT_DIR / "news_all.csv"
-OUT_BRI = OUT_DIR / "briefing.txt"
-OUT_KW = OUT_DIR / "keywords_used.txt"
-OUT_SRC = OUT_DIR / "sources_used.txt"
-OUT_ERR = OUT_DIR / "errors.log"
+# ---------- 路径/常量 ----------
+BASE = Path(".")
+OUT_CSV = BASE/"news_all.csv"
+OUT_BRI = BASE/"briefing.txt"
+OUT_KW  = BASE/"keywords_used.txt"
+OUT_SRC = BASE/"sources_used.txt"
+ERR_LOG = BASE/"errors.log"
+HOLDINGS = BASE/"holdings.json"
+TZ = timezone(timedelta(hours=8))
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
-DAYS_LOOKBACK = int(os.getenv("NEWS_DAYS", "3"))   # 近几天
-CONCURRENCY = 8                                    # 并发抓取上限/关键词
-MAX_PER_KEYWORD = 80                               # 每个关键词抓取条数上限（Google News RSS 能给到的就拿）
-USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36")
+GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
+JUHE_API = "http://apis.juhe.cn/fapigx/caijing/query"
 
-# ───────── 工具 ─────────
-def logerr(msg: str):
-    OUT_ERR.parent.mkdir(parents=True, exist_ok=True)
-    with OUT_ERR.open("a", encoding="utf-8") as f:
-        f.write(f"{datetime.now(TZ).isoformat()} - {msg}\n")
+# ---------- 小工具 ----------
+def nowstr():
+    return datetime.now(TZ).isoformat(timespec="seconds")
 
-def load_holdings() -> list[dict]:
-    # 优先读文件，其次读 env HOLDINGS_JSON
-    p = Path("holdings.json")
-    if p.is_file():
-        return json.loads(p.read_text("utf-8"))
-    env = os.getenv("HOLDINGS_JSON")
-    return json.loads(env) if env else []
+def logerr(msg: str, exc: Exception|None=None):
+    line = f"{nowstr()} - {msg}"
+    if exc:
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        line += f"\n{tb}"
+    with ERR_LOG.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    rprint(f"[red]ERROR[/red] - {msg}")
 
-def uniq_keep_order(seq):
-    seen = set()
-    out = []
-    for x in seq:
-        if x and x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
+def info(msg: str):
+    rprint(f"{nowstr()} - [cyan]{msg}[/cyan]")
 
-def strip_html(s: str) -> str:
-    if not s:
-        return ""
-    return BeautifulSoup(s, "html.parser").get_text(" ", strip=True)
+def read_json(p: Path) -> Any:
+    return json.loads(p.read_text("utf-8"))
 
-def host_of(url: str) -> str:
-    try:
-        return urlparse(url).netloc or "unknown"
-    except Exception:
-        return "unknown"
+def decode_bytes(b: bytes) -> str:
+    # 解决“乱码”：用 charset-normalizer 自动识别
+    res = from_bytes(b).best()
+    return (res or "").output_text if res else b.decode("utf-8", errors="ignore")
 
-# ───────── LLM 生成关键词（2–4 汉字）─────────
-async def qwen_keywords(etf_names: list[str]) -> list[str]:
+def strip_text(html: str) -> str:
+    soup = BeautifulSoup(html, "lxml")
+    # 主体取 <p> 文本，若过少，再退化取全页文本
+    ps = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
+    body = " ".join(ps).strip()
+    if len(body) < 120:
+        body = soup.get_text(" ", strip=True)
+    return re.sub(r"\s+", " ", body)
+
+def norm_kw(kw: str) -> str:
+    kw = kw.strip()
+    # 只保留 ≤4 字的中文短词 或 简短英文 token
+    if re.fullmatch(r"[\u4e00-\u9fff]{1,4}", kw):  # 中文1-4字
+        return kw
+    if re.fullmatch(r"[A-Za-z0-9\-]{1,12}", kw):
+        return kw.lower()
+    return ""
+
+def hit_any(text: str, keywords: List[str]) -> bool:
+    if not keywords:
+        return True
+    lt = text.lower()
+    for k in keywords:
+        k2 = k.lower()
+        if k2 and k2 in lt:
+            return True
+    return False
+
+# ---------- 关键词 ----------
+async def call_qwen_short_keywords(names: List[str]) -> List[str]:
     api = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     key = os.getenv("QWEN_API_KEY")
     if not key:
-        rprint("[yellow]⚠️ 未配置 QWEN_API_KEY，将退化为规则切词[/yellow]")
+        info("Qwen 未配置，跳过 LLM 关键词生成")
         return []
-
-    # 让模型只吐 JSON：{"kw": ["XXXX","YYYY",...]}，每个词 2-4 个汉字，金融/行业相关
     prompt = (
-        "请根据这些ETF中文名称，产生与其行业/主题强相关的搜索关键词（仅中文，2-4个汉字，避免过泛词如“市场/公司/经济”）。"
-        "不要解释，不要换行，严格输出 JSON 格式：{\"kw\": [\"词1\",\"词2\",...]}。ETF：\n"
-        + "、".join(etf_names)
+        "请基于以下ETF/行业名称，列出**仅中文优先的短关键词**（每个≤4字；"
+        "允许少量英文缩写≤12字符；侧重行业、赛道、产品、政策、上游材料、下游应用等），"
+        "用顿号或空格分隔，不要解释：\n" + "、".join(names)
     )
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
-    payload = {"model": "qwen-plus", "input": {"prompt": prompt},
-               "parameters": {"max_tokens": 500, "temperature": 0.3}}
-
-    try:
-        async with httpx.AsyncClient(timeout=60, headers=headers) as c:
-            resp = await c.post(api, json=payload)
-            text = resp.json()["output"]["text"]
-    except Exception as e:
-        logerr(f"Qwen 调用失败：{e}")
-        return []
-
-    # 尝试解析 JSON；如果失败，回退用正则提取 2-4 汉字词
-    try:
-        js = json.loads(text)
-        arr = js.get("kw", [])
-        out = [x.strip() for x in arr if re.fullmatch(r"[\u4e00-\u9fa5]{2,4}", x or "")]
-        return uniq_keep_order(out)
-    except Exception:
-        # 正则兜底
-        out = re.findall(r"[\u4e00-\u9fa5]{2,4}", text)
-        return uniq_keep_order(out)
-
-# ───────── 规则备份关键词（无 LLM 时）─────────
-def backup_keywords_from_etf_names(etf_names: list[str]) -> list[str]:
-    # 从 ETF 名里抽取 2-4 字词（去掉“ETF/指数/基金/交易型”等常见词）
-    junk = {"ETF", "指数", "基金", "交易", "交易型", "场内", "份额", "联接", "增强", "沪深", "中证"}
-    cand = []
-    for name in etf_names:
-        name = re.sub(r"[A-Za-z0-9\-\s\.]+", "", name or "")
-        words = re.findall(r"[\u4e00-\u9fa5]{2,4}", name)
-        for w in words:
-            if w not in junk:
-                cand.append(w)
-    return uniq_keep_order(cand)
-
-# ───────── Google News RSS 搜索 ─────────
-async def google_news_for_keyword(client: httpx.AsyncClient, kw: str, days: int, max_items: int) -> list[dict]:
-    # q=关键词 when:Xd；中文界面
-    url = (f"https://news.google.com/rss/search?q={quote(kw)}+when:{days}d"
-           f"&hl=zh-CN&gl=CN&ceid=CN:zh-Hans")
-    try:
-        r = await client.get(url)
-        txt = r.text
-    except Exception as e:
-        logerr(f"GoogleNews 请求失败 kw={kw} err={e}")
-        return []
-
-    try:
-        feed = feedparser.parse(txt)
-        items = []
-        for e in feed.entries[:max_items]:
-            title = html.unescape(e.get("title", "").strip())
-            summ = strip_html(e.get("summary", ""))
-            link = e.get("link", "")
-            # 发布时间
-            if e.get("published_parsed"):
-                dt = datetime.fromtimestamp(
-                    __import__("time").mktime(e.published_parsed), tz=timezone.utc
-                ).astimezone(TZ)
-            else:
-                dt = datetime.now(TZ)
-            src = (e.get("source", {}) or {}).get("title") or host_of(link)
-            items.append({
-                "published_at": dt.isoformat(),
-                "title": title,
-                "summary": summ,
-                "url": link,
-                "source": f"GoogleNews:{src}",
-                "keyword": kw
-            })
-        return items
-    except Exception as e:
-        logerr(f"GoogleNews 解析失败 kw={kw} err={e}")
-        return []
-
-# （可选）聚合数据 - 综合财经新闻（按关键词逐次查）
-async def juhe_finance(client: httpx.AsyncClient, kw: str, key: str) -> list[dict]:
-    # 文档不详，尽量兼容常见参数名；失败只记日志不中断
-    api = "http://apis.juhe.cn/fapigx/caijing/query"
-    params_try = [
-        {"key": key, "q": kw, "size": 50},
-        {"key": key, "keyword": kw, "size": 50},
-        {"key": key, "word": kw, "size": 50},
-    ]
-    for params in params_try:
+    hdr = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    pl = {"model": "qwen-plus", "input": {"prompt": prompt},
+          "parameters": {"max_tokens": 300, "temperature": 0.3}}
+    async with httpx.AsyncClient(timeout=30) as c:
         try:
-            r = await client.get(api, params=params)
-            js = r.json()
-            if js.get("result"):
-                out = []
-                for d in js["result"]:
-                    out.append({
-                        "published_at": (d.get("pubDate") or d.get("ctime") or NOW_ISO),
-                        "title": d.get("title", "").strip(),
-                        "summary": strip_html(d.get("digest") or d.get("content") or ""),
-                        "url": d.get("url") or d.get("link") or "",
-                        "source": f"Juhe:{d.get('source','')}",
-                        "keyword": kw
-                    })
-                return out
+            r = await c.post(api, headers=hdr, json=pl)
+            r.raise_for_status()
+            text = r.json()["output"]["text"]
         except Exception as e:
-            logerr(f"Juhe 调用失败 kw={kw} err={e}")
-    return []
+            logerr("Qwen 调用失败", e); return []
+    # 粗解析：按非字母/数字/中文切分
+    raw = re.split(r"[，、,\s/|]+", text)
+    out = []
+    for w in raw:
+        w2 = norm_kw(w)
+        if w2:
+            out.append(w2)
+    # 去重
+    seen, final = set(), []
+    for x in out:
+        if x not in seen:
+            seen.add(x); final.append(x)
+    return final[:120]
 
-# ───────── 主收集流程 ─────────
-async def collect():
-    print(f"{datetime.now(TZ).isoformat()} - INFO - 开始收集（近 {DAYS_LOOKBACK} 天），调用 Qwen 生成补充关键词")
+def base_keywords_from_holdings(holds: List[dict]) -> Tuple[List[str], List[str]]:
+    """返回(ETF名称列表, 初始短关键词)"""
+    etf_names = []
+    base = []
+    for h in holds:
+        n = (h.get("name") or "").strip()
+        s = (h.get("symbol") or "").strip()
+        if n:
+            etf_names.append(n)
+            # 从 ETF 名称抽取 1-2 个关键词（去掉 “ETF/指数/基金”）
+            n2 = re.sub(r"(ETF|指数|基金)", "", n, flags=re.I)
+            # 取中文连续词/数字词
+            toks = re.findall(r"[\u4e00-\u9fff]{2,4}|[A-Za-z0-9]{2,8}", n2)
+            for t in toks[:2]:
+                t2 = norm_kw(t)
+                if t2:
+                    base.append(t2)
+        elif s:
+            etf_names.append(s)
+    # 去重
+    seen, base2 = set(), []
+    for x in base:
+        if x not in seen:
+            seen.add(x); base2.append(x)
+    return etf_names, base2
 
-    holds = load_holdings()
-    print(f"{datetime.now(TZ).isoformat()} - INFO - 读取持仓：holdings.json 共 {len(holds)} 条")
-    etf_names = [h.get("name") or h.get("symbol") for h in holds]
-    etf_names = [n for n in etf_names if n]
+# ---------- 抓 Google News ----------
+async def fetch_google_news(keywords: List[str], days: int) -> List[dict]:
+    # 组合 OR 查询（避免太长，分批）
+    out: List[dict] = []
+    since = datetime.now(TZ) - timedelta(days=days)
+    queries = []
+    batch, ln = [], 0
+    for k in keywords:
+        token = f"\"{k}\""
+        if ln + len(token) > 120:  # 控 query 长度
+            if batch: queries.append(" OR ".join(batch))
+            batch, ln = [token], len(token)
+        else:
+            batch.append(token); ln += len(token) + 4
+    if batch: queries.append(" OR ".join(batch))
 
-    # 1) LLM 关键词
-    kw_llm = await qwen_keywords(etf_names)
-    # 2) 备份规则关键词（LLM 为空时使用；否则也一并加入）
-    kw_backup = backup_keywords_from_etf_names(etf_names)
-    base_kw = uniq_keep_order(kw_llm + kw_backup)
+    async with httpx.AsyncClient(headers={"User-Agent": UA}, timeout=20) as c:
+        for q in queries:
+            params = {"q": q, "hl": "zh-CN"}
+            try:
+                # 直接用 feedparser 读 RSS
+                url = httpx.URL(GOOGLE_NEWS_RSS, params=params)
+                # 不能直接让 feedparser 发网，我们先取文本自己喂它，便于日志与容错
+                r = await c.get(str(url))
+                if r.status_code != 200:
+                    logerr(f"GoogleNews RSS 非200: {r.status_code}")
+                    continue
+                feed = feedparser.parse(r.content)
+                for e in feed.entries:
+                    # 时间
+                    ts = None
+                    if "published" in e:
+                        try:
+                            ts = dtparse.parse(e.published)
+                        except Exception:
+                            ts = None
+                    if not ts and "updated" in e:
+                        try:
+                            ts = dtparse.parse(e.updated)
+                        except Exception:
+                            ts = None
+                    if ts and ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts and ts < since:
+                        continue
+                    out.append({
+                        "title": e.get("title", "").strip(),
+                        "summary": BeautifulSoup(e.get("summary", ""), "lxml").get_text(" ", strip=True),
+                        "url": e.get("link", ""),
+                        "source": "GoogleNews",
+                        "published_at": (ts.astimezone(TZ).isoformat() if ts else ""),
+                    })
+            except Exception as e:
+                logerr("GoogleNews 抓取失败", e)
+    return out
 
-    # 限制词长 2-4 汉字 & 去重
-    base_kw = [k for k in base_kw if re.fullmatch(r"[\u4e00-\u9fa5]{2,4}", k or "")]
-    print(f"{datetime.now(TZ).isoformat()} - INFO - 最终关键词 {len(base_kw)} 个，已写 keywords_used.txt / sources_used.txt")
+# ---------- 抓 聚合数据（可选） ----------
+async def fetch_juhe_caijing(keywords: List[str], days: int) -> List[dict]:
+    key = os.getenv("JUHE_KEY")
+    if not key:
+        info("JUHE_KEY 未配置，跳过聚合数据"); return []
+    # 聚合接口文档：fapigx/caijing/query?k=关键词（支持多关键词 OR）
+    # 我们把 10~20 个短词拼成一个管道分隔串，分批请求
+    out: List[dict] = []
+    since = datetime.now(TZ) - timedelta(days=days)
+    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": UA}) as c:
+        batch = []
+        for i, k in enumerate(keywords, 1):
+            batch.append(k)
+            if len(batch) >= 15 or i == len(keywords):
+                q = "|".join(batch); batch = []
+                try:
+                    r = await c.get(JUHE_API, params={"key": key, "k": q, "ps": 50, "page": 1})
+                    r.raise_for_status()
+                    js = r.json()
+                    if js.get("error_code") != 0:
+                        logerr(f"聚合数据返回错误: {js.get('reason')}")
+                        continue
+                    data = js.get("result", []) or js.get("result", {}).get("data", [])
+                    for d in (data or []):
+                        title = (d.get("title") or "").strip()
+                        url = (d.get("url") or "").strip()
+                        src = (d.get("src") or d.get("author") or "聚合数据").strip()
+                        tstr = d.get("time") or d.get("pubDate") or ""
+                        try:
+                            ts = dtparse.parse(tstr) if tstr else None
+                        except Exception:
+                            ts = None
+                        if ts and ts < since:
+                            continue
+                        out.append({
+                            "title": title,
+                            "summary": (d.get("digest") or d.get("content") or "").strip(),
+                            "url": url, "source": src,
+                            "published_at": ts.astimezone(TZ).isoformat() if ts else "",
+                        })
+                except Exception as e:
+                    logerr("聚合数据请求失败", e)
+    return out
 
-    if not base_kw:
-        OUT_KW.write_text("(空)\n", encoding="utf-8")
-        OUT_SRC.write_text("未调用任何源（关键词为空）\n", encoding="utf-8")
-        logerr("关键词集合为空：可能 Qwen 无返回且备份规则未命中")
-        return []
+# ---------- 抓正文并筛选 ----------
+async def fetch_body_and_filter(items: List[dict], keywords: List[str], limit: int) -> List[dict]:
+    out: List[dict] = []
+    sem = asyncio.Semaphore(12)
 
-    # 写 keywords_used.txt
-    OUT_KW.write_text("\n".join(base_kw), encoding="utf-8")
-
-    # 并发抓取
-    juhe_key = os.getenv("JUHE_KEY")
-    sem = asyncio.Semaphore(CONCURRENCY)
-    src_lines = []
-
-    async with httpx.AsyncClient(timeout=20, headers={"User-Agent": USER_AGENT}) as client:
-        async def one_kw(kw: str) -> list[dict]:
+    async def worker(it: dict):
+        if not it.get("url"): 
+            return
+        try:
             async with sem:
-                g_items = await google_news_for_keyword(client, kw, DAYS_LOOKBACK, MAX_PER_KEYWORD)
-                src_lines.append(f"GoogleNews kw={kw} items={len(g_items)}")
-                j_items = []
-                if juhe_key:
-                    j_items = await juhe_finance(client, kw, juhe_key)
-                    src_lines.append(f"Juhe kw={kw} items={len(j_items)}")
-                return g_items + j_items
+                async with httpx.AsyncClient(headers={"User-Agent": UA}, timeout=15, follow_redirects=True) as c:
+                    r = await c.get(it["url"])
+            if r.status_code != 200:
+                logerr(f"正文请求非200: {r.status_code} {it['url']}")
+                return
+            html = decode_bytes(r.content)
+            body = strip_text(html)
+            if not body or len(body) < 60:
+                return
+            if hit_any((it.get("title", "") + " " + body), keywords):
+                it2 = dict(it)
+                it2["body_snippet"] = body[:800]
+                out.append(it2)
+        except Exception as e:
+            logerr(f"抓正文失败: {it.get('url','')}", e)
 
-        tasks = [one_kw(k) for k in base_kw]
-        all_lists = await asyncio.gather(*tasks, return_exceptions=True)
+    tasks = [asyncio.create_task(worker(it)) for it in items]
+    if tasks:
+        await asyncio.gather(*tasks)
 
-    # 汇总 & 错误处理
-    rows = []
-    for idx, res in enumerate(all_lists):
-        if isinstance(res, Exception):
-            logerr(f"关键词[{base_kw[idx]}] 任务异常: {traceback.format_exception_only(type(res), res)[0].strip()}")
-            continue
-        rows.extend(res)
+    # 不去重，按时间降序；保留 limit
+    def ts_of(d):
+        try:
+            return dtparse.parse(d.get("published_at") or "1970-01-01")
+        except Exception:
+            return datetime(1970,1,1,tzinfo=timezone.utc)
+    out.sort(key=ts_of, reverse=True)
+    return out[:limit]
 
-    # 写 sources_used.txt
-    OUT_SRC.write_text("\n".join(src_lines) + "\n", encoding="utf-8")
+# ---------- 主逻辑 ----------
+async def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--days", type=int, default=3, help="抓取近 N 天")
+    ap.add_argument("--limit", type=int, default=500, help="最多入表条数（筛选后）")
+    args = ap.parse_args()
 
-    # 写 CSV（不去重）
-    if rows:
-        rows.sort(key=lambda x: x["published_at"], reverse=True)
+    # 清空本轮错误
+    ERR_LOG.write_text("", encoding="utf-8")
+
+    info("开始收集（近 %d 天），调用 Qwen 生成补充关键词" % args.days)
+
+    if not HOLDINGS.exists():
+        raise SystemExit("holdings.json 不存在")
+    holds = read_json(HOLDINGS)
+    info(f"读取持仓：holdings.json 共 {len(holds)} 条")
+
+    etf_names, base_kw = base_keywords_from_holdings(holds)
+    # LLM 生成短关键词（≤4字）：
+    llm_kw = await call_qwen_short_keywords(etf_names)
+    # 最终关键词：以 LLM 结果为主，去重；（不再强制加“初始关键词”）
+    seen, final_kw = set(), []
+    for w in llm_kw:
+        if w not in seen:
+            seen.add(w); final_kw.append(w)
+    info(f"最终关键词 {len(final_kw)} 个，已写 keywords_used.txt / sources_used.txt")
+    OUT_KW.write_text("\n".join(final_kw), encoding="utf-8")
+
+    # 记录来源（固定两个模块）
+    OUT_SRC.write_text("GoogleNews RSS\n聚合数据 fapigx/caijing\n", encoding="utf-8")
+
+    # 1) Google News
+    gn_items = await fetch_google_news(final_kw, args.days)
+    info(f"GoogleNews 抓到 {len(gn_items)} 条（未筛）")
+
+    # 2) 聚合数据（可选）
+    juhe_items = await fetch_juhe_caijing(final_kw, args.days)
+    info(f"聚合数据 抓到 {len(juhe_items)} 条（未筛）")
+
+    # 合并
+    raw_items = gn_items + juhe_items
+    info(f"收集完成：全量 {len(raw_items)} 条（未去重）")
+
+    # 抓正文并筛选
+    kept = await fetch_body_and_filter(raw_items, final_kw, args.limit)
+    info(f"正文筛选后保留 {len(kept)} 条")
+
+    # 写 CSV
+    if kept:
         with OUT_CSV.open("w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["published_at", "source", "title", "summary", "url", "keyword"])
-            for it in rows:
-                w.writerow([it["published_at"], it["source"], it["title"], it["summary"], it["url"], it["keyword"]])
+            w.writerow(["published_at","source","title","url","summary","body_snippet"])
+            for it in kept:
+                w.writerow([
+                    it.get("published_at",""),
+                    it.get("source",""),
+                    it.get("title",""),
+                    it.get("url",""),
+                    (it.get("summary","") or "")[:300],
+                    (it.get("body_snippet","") or "").replace("\n"," ")[:1500],
+                ])
+    # 写 briefing
+    lines = [f"共 {len(kept)} 条（{nowstr()}）"]
+    for i, it in enumerate(kept[:40], 1):
+        lines.append(f"{i}. [{it.get('title','')}]({it.get('url','')}) — {it.get('source','')}  {it.get('published_at','')}")
+        if it.get("summary"):
+            lines.append("   " + it["summary"][:180])
+    OUT_BRI.write_text("\n".join(lines), encoding="utf-8")
 
-        # 写 briefing.txt（标题和摘要分行，方便阅读）
-        lines = ["# 今日新闻简报（自动汇总）", f"时间：{NOW_ISO}", ""]
-        for i, it in enumerate(rows[:60], 1):  # 简报最多 60 条
-            lines.append(f"{i}. {it['title']}  [{it['source']}]")
-            if it["summary"]:
-                lines.append(f"    {it['summary']}")
-            lines.append(f"    {it['url']}")
-            lines.append("")
-        OUT_BRI.write_text("\n".join(lines), encoding="utf-8")
-
-        print(f"{datetime.now(TZ).isoformat()} - INFO - 收集完成：全量 {len(rows)} 条（未去重）")
-        print(f"{datetime.now(TZ).isoformat()} - INFO - 已写 briefing.txt、news_all.csv、keywords_used.txt、sources_used.txt")
-    else:
-        # 即便 0 条，也要写空文件，避免你找不到
-        OUT_CSV.write_text("", encoding="utf-8")
-        OUT_BRI.write_text("# 今日新闻简报（空）\n", encoding="utf-8")
-        print(f"{datetime.now(TZ).isoformat()} - INFO - 收集完成：全量 0 条（未去重）")
-        print(f"{datetime.now(TZ).isoformat()} - INFO - 已写 briefing.txt、news_all.csv、keywords_used.txt、sources_used.txt")
-
-    # errors.log 如果没内容，也写一行说明
-    if not OUT_ERR.exists() or OUT_ERR.stat().st_size == 0:
-        OUT_ERR.write_text(f"{NOW_ISO} - 没有捕获到错误\n", encoding="utf-8")
-    print(f"{datetime.now(TZ).isoformat()} - INFO - errors.log 大小 {OUT_ERR.stat().st_size} bytes")
-    print(f"{datetime.now(TZ).isoformat()} - INFO - collector 任务完成")
-
-def main():
-    asyncio.run(collect())
+    # 错误大小
+    err_sz = ERR_LOG.stat().st_size if ERR_LOG.exists() else 0
+    info(f"已写 briefing.txt、news_all.csv、keywords_used.txt、sources_used.txt")
+    info(f"errors.log 大小 {err_sz} bytes")
+    info("collector 任务完成")
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        logerr("程序致命错误", e)
+        raise
