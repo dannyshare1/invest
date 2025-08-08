@@ -1,9 +1,7 @@
-httpx
-python-dateutil
-rich
-openai
-pyyaml
-requests
-beautifulsoup4
-lxml
-charset-normalizer
+httpx==0.27.2
+feedparser==6.0.11
+beautifulsoup4==4.12.3
+lxml==5.2.2
+python-dateutil==2.9.0.post0
+charset-normalizer==3.3.2
+rich==13.7.1
