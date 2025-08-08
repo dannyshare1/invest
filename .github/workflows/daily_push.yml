@@ -12,13 +12,14 @@ jobs:
     timeout-minutes: 25
 
     env:
-      TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
-      JUHE_KEY: ${{ secrets.JUHE_KEY }}
       QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+      JUHE_KEY: ${{ secrets.JUHE_KEY }}
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       SCKEY: ${{ secrets.SCKEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      USE_GOOGLE: "0"   # 默认关 Google；需要时设为 "1"
+      # 控制抓取窗口天数
+      SPAN_DAYS: "3"
 
     steps:
       - name: Checkout
@@ -36,18 +37,27 @@ jobs:
 
       - name: Show holdings
         run: |
-          echo "holdings.json present? $([ -f holdings.json ] && echo yes || echo no)"
-          python -c "import json, pathlib; p=pathlib.Path('holdings.json'); print(p.read_text('utf-8') if p.is_file() else 'holdings.json not found')"
+          echo "holdings.json content:"
+          python - << 'PY'
+import json, pathlib
+p=pathlib.Path('holdings.json')
+print(p.read_text('utf-8') if p.is_file() else 'holdings.json not found')
+PY
 
       - name: Run collector (news_pipeline.py)
         run: python news_pipeline.py
 
       - name: Run pusher (daily_push_qwen.py)
-        run: python daily_push_qwen.py
+        run: |
+          if [ -f "daily_push_qwen.py" ]; then
+            python daily_push_qwen.py || true
+          else
+            echo "daily_push_qwen.py not found, skip push."
+          fi
 
       - name: Upload artifacts (outputs + logs)
-        if: always()
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: news-artifacts
           if-no-files-found: ignore
@@ -57,5 +67,5 @@ jobs:
             keywords_used.txt
             qwen_keywords.txt
             sources_used.txt
+            sources_health.json
             errors.log
-            logs-and-history-*.zip
