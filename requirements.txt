@@ -1,7 +1,7 @@
 httpx
-feedparser
-beautifulsoup4
-readability-lxml
-lxml
 python-dateutil
 rich
+requests
+feedparser
+beautifulsoup4
+lxml
