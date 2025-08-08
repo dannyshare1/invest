@@ -18,8 +18,17 @@ jobs:
       SCKEY: ${{ secrets.SCKEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      # 控制抓取窗口天数
       SPAN_DAYS: "3"
+
+      # ↓↓↓ 新增：源白名单/黑名单/自定义
+      # 说明：使用 “sid” 值（见 news_pipeline.py 源表）
+      # 仅用这些源（留空=不启用白名单）
+      RSS_WHITELIST: ""
+      # 排除这些源（留空=不启用黑名单）
+      RSS_BLACKLIST: ""
+      # 追加自定义 RSS 源：用分号分隔多条，每条格式：名称|id|url
+      # 例如： "某行业媒体|myind|https://example.com/rss;国际监管|regint|https://rsshub.app/xxx"
+      RSS_EXTRA: ""
 
     steps:
       - name: Checkout
@@ -38,11 +47,7 @@ jobs:
       - name: Show holdings
         run: |
           echo "holdings.json content:"
-          python - << 'PY'
-import json, pathlib
-p=pathlib.Path('holdings.json')
-print(p.read_text('utf-8') if p.is_file() else 'holdings.json not found')
-PY
+          if [ -f holdings.json ]; then cat holdings.json; else echo "holdings.json not found"; fi
 
       - name: Run collector (news_pipeline.py)
         run: python news_pipeline.py
