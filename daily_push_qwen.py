@@ -1,125 +1,121 @@
 # -*- coding: utf-8 -*-
 """
-daily_push_qwen.py — 动态行业 + 固定三段输出
-输出固定包含：
-1) 今日关键行情 / 板块异动
-2) 每个持仓的操作提示（维持/加/减/止盈）
-3) 新机会 / 新风险（可选）
+daily_push_qwen.py — 精简高质量 Prompt（行业动态自动从 holdings.json 推断）
+读取：
+- holdings.json
+- briefing.txt（由 news_pipeline.py 生成）
+
+推送：
+- Telegram（可选）
+- Server 酱（可选）
+
+环境变量：
+- QWEN_API_KEY
+- TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+- SCKEY
 """
+
 from __future__ import annotations
-import asyncio, os, json, pathlib, textwrap
-from datetime import datetime, timezone, timedelta
+import os, json, textwrap, asyncio
+from datetime import datetime
+from pathlib import Path
 import httpx
 
-TZ = timezone(timedelta(hours=8))
-QWEN_API = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-MODEL = "qwen-plus"
-
-def now_str(): return datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
-
-def load_holdings():
-    p = pathlib.Path("holdings.json")
+def load_holdings() -> list[dict]:
+    p = Path("holdings.json")
     if p.is_file():
         return json.loads(p.read_text("utf-8"))
-    return []
+    env = os.getenv("HOLDINGS_JSON")
+    return json.loads(env) if env else []
 
-def infer_industries(holds):
+def infer_industries(holds: list[dict]) -> list[str]:
+    # 极简启发式：从中文名称中提取板块词
     m = {
-        "半导体": "半导体",
-        "医药": "医药",
-        "酒": "白酒",
-        "国债": "债券",
-        "沪深300": "宏观",
-        "豆粕": "农业",
+        "半导体": "半导体", "芯片": "半导体", "医药": "医药", "医疗": "医药", "酒": "白酒/消费", "红利": "红利/高股息",
+        "沪深300": "宽基", "中证": "宽基/主题", "国债": "债券/利率", "农业": "农业/大宗", "豆粕": "农业/大宗",
     }
-    out = set()
+    out = []
     for h in holds:
-        name = (h.get("name") or "") + (h.get("symbol") or "")
-        for k, v in m.items():
-            if k in name:
-                out.add(v)
-    if not out:
-        out.add("宏观")
-    return sorted(out)
+        name = h.get("name","") + h.get("symbol","")
+        hit = [v for k, v in m.items() if k in name]
+        out.extend(hit or ["其他"])
+    # 去重保序
+    seen, res = set(), []
+    for x in out:
+        if x not in seen:
+            seen.add(x); res.append(x)
+    return res
 
-async def call_llm(prompt: str) -> str:
-    hdr = {
-        "Authorization": f"Bearer {os.getenv('QWEN_API_KEY')}",
-        "Content-Type": "application/json",
-    }
-    pl = {"model": MODEL, "input": {"prompt": prompt}, "parameters": {"max_tokens": 900, "temperature": 0.3}}
-    async with httpx.AsyncClient() as c:
-        # 简单重试
-        for i in range(3):
-            try:
-                r = await c.post(QWEN_API, headers=hdr, json=pl, timeout=60)
-                r.raise_for_status()
-                return r.json()["output"]["text"].strip()
-            except Exception:
-                if i == 2: raise
-                await asyncio.sleep(2*(i+1))
-
-def build_prompt(holds, industries, briefing_text: str) -> str:
-    holdings_lines = "\n".join([f"- {h.get('name','?')} ({h.get('symbol','?')}): {h.get('weight',0)*100:.1f}%" for h in holds]) or "(空)"
-    industry_str = ", ".join(industries)
-    ctx = f"\n\n【新闻上下文（命中关键词节选）】\n{briefing_text}\n" if briefing_text else ""
-    return textwrap.dedent(f"""
-        你是一名专业中国市场策略分析师。现在时间 {now_str()}。
-
-        【持仓】
-        {holdings_lines}
-
-        【关注行业（动态生成）】{industry_str}
-        {ctx}
-
-        请用中文输出，且严格包含以下三部分：
-        1) **今日关键行情 / 板块异动**（3-6 条，尽量与上述行业相关）
-        2) **每个持仓的操作提示**（逐项给出：维持/加/减/止盈，≤40 字/项，直给理由）
-        3) **新的机会或风险（可选）**（1-3 条，可含标的或主题，给出触发条件）
-
-        约束：
-        - 结论要具体；避免空话。
-        - 若新闻上下文不足，请基于常识给出“需要观察的指标/数据”。
-        - 不构成投资建议。
-    """).strip()
+async def call_qwen(prompt: str) -> str:
+    api = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+    key = os.getenv("QWEN_API_KEY")
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    payload = {"model": "qwen-plus", "input": {"prompt": prompt},
+               "parameters": {"max_tokens": 800, "temperature": 0.5}}
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(api, headers=headers, json=payload)
+        r.raise_for_status()
+        return r.json()["output"]["text"].strip()
 
 async def push_serverchan(text: str):
     key = os.getenv("SCKEY")
     if not key: return
-    async with httpx.AsyncClient() as c:
-        await c.post(f"https://sctapi.ftqq.com/{key}.send", data={"text":"策略提示","desp":text}, timeout=20)
+    async with httpx.AsyncClient(timeout=20) as c:
+        await c.post(f"https://sctapi.ftqq.com/{key}.send", data={"text":"每日策略", "desp":text})
 
 async def push_telegram(text: str):
-    tok=os.getenv('TELEGRAM_BOT_TOKEN'); cid=os.getenv('TELEGRAM_CHAT_ID')
+    tok=os.getenv("TELEGRAM_BOT_TOKEN"); cid=os.getenv("TELEGRAM_CHAT_ID")
     if not tok or not cid: return
     chunks=[text[i:i+3900] for i in range(0,len(text),3900)]
-    async with httpx.AsyncClient() as c:
+    async with httpx.AsyncClient(timeout=20) as c:
         for ch in chunks:
             await c.post(f"https://api.telegram.org/bot{tok}/sendMessage",
-                         data={"chat_id":cid,"text":ch,"parse_mode":"Markdown"},
-                         timeout=20)
+                         data={"chat_id":cid,"text":ch,"parse_mode":"Markdown"})
 
 async def main():
     holds = load_holdings()
-    print(f"{now_str()} - INFO - Loaded holdings ({len(holds)})")
-    industries = infer_industries(holds)
+    print(f"{datetime.now().isoformat()} - INFO - Loaded holdings from holdings.json ({len(holds)})")
 
     brief = ""
-    if pathlib.Path("briefing.txt").is_file():
-        brief = pathlib.Path("briefing.txt").read_text("utf-8")[:4000]  # 控制上下文长度
-        print(f"{now_str()} - INFO - Loaded briefing.txt for context")
+    if Path("briefing.txt").is_file():
+        brief = Path("briefing.txt").read_text("utf-8")
+        print(f"{datetime.now().isoformat()} - INFO - Loaded briefing.txt for context")
 
-    prompt = build_prompt(holds, industries, brief)
-    print(f"{now_str()} - INFO - Prompt prepared, calling Qwen...")
+    # 行业自动推断
+    industries = infer_industries(holds)
+    hold_lines = "\n".join([f"- {h.get('name','?')} ({h.get('symbol','?')}): {h.get('weight',0):.2f}" for h in holds]) or "(空)"
+
+    prompt = textwrap.dedent(f"""
+    你是一名专业中国量化策略师。基于我的当前持仓（见下）与“新闻简报”，给出**简洁、操作性强**的盘后建议。
+    - 持仓行业（自动推断）：{", ".join(industries) or "(未知)"}
+
+    【当前持仓】
+    {hold_lines}
+
+    【新闻简报/材料（可选）】
+    {brief}
+
+    请输出 Markdown，结构严格如下（不要赘述）：
+    ### 今日关键行情 / 板块异动
+    - 3–5 条要点，覆盖与持仓相关行业
+
+    ### 持仓操作提示
+    - 逐项给出 *维持/加/减/止盈*（≤40字/项，说明逻辑）
+
+    ### 新的机会 / 风险
+    - 2–4 条，若无则写“暂无”
+    """)
+
+    print(f"{datetime.now().isoformat()} - INFO - Prompt prepared, calling Qwen...")
     try:
-        ans = await call_llm(prompt)
+        ans = await call_qwen(prompt)
     except Exception as e:
-        print(f"{now_str()} - ERROR - Qwen 调用失败: {e!r}")
+        print(f"{datetime.now().isoformat()} - ERROR - Qwen 调用失败：{e}")
         return
 
-    await push_serverchan(ans)
     await push_telegram(ans)
-    print(f"{now_str()} - INFO - 推送完成")
+    await push_serverchan(ans)
+    print(f"{datetime.now().isoformat()} - INFO - generic 推送完成")
 
 if __name__ == "__main__":
     asyncio.run(main())
