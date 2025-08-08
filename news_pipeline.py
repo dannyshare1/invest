@@ -273,7 +273,7 @@ async def main(days: int = 3, juhe_pages: int = 8, juhe_pagesize: int = 50, rss_
         if it.get("summary"):
             lines.append(it["summary"])
         lines.append("")
-    OUT_BRI F.write_text("\n".join(lines), encoding="utf-8")
+    OUT_BRIF.write_text("\n".join(lines), encoding="utf-8")
 
     print(f"{now_str()} - INFO - 收集完成：全量 {len(all_items)} 条，命中 {len(hit_items)} 条（未去重）")
     print(f"{now_str()} - INFO - 已写 briefing.txt、news_all.csv、keywords_used.txt、sources_used.txt")
