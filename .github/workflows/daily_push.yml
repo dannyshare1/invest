@@ -1,19 +1,26 @@
-name: daily-push
+name: Collector and Push
 
 on:
-  schedule:
-    # GitHub Actions 用 UTC，需要把北京时间换算成 UTC
-    # 北京 09:50  -> UTC 01:50
-    # 北京 11:20  -> UTC 03:20
-    # 北京 15:05  -> UTC 07:05
-    - cron: "50 1 * * 1-5"
-    - cron: "20 3 * * 1-5"
-    - cron: "05 7 * * 1-5"
   workflow_dispatch:
+  schedule:
+    # 工作日白天每小时跑一次采集 + 推送（UTC 1-8点 ~ 北京 09:00-16:00）
+    - cron: '0 1-8 * * 1-5'
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+      JUHE_KEY: ${{ secrets.JUHE_KEY }}
+      QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+      SCKEY: ${{ secrets.SCKEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # 采集器可选项
+      USE_GOOGLE: "0"        # 默认关Google。如需开，改为 "1"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,46 +28,39 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install -U pip
           pip install -r requirements.txt
 
-      - name: Run collector (news_pipeline)
-        env:
-          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
-          JUHE_KEY: ${{ secrets.JUHE_KEY }}
+      - name: Show holdings
         run: |
-          python news_pipeline.py
+          echo "holdings.json content (masked weights):"
+          python - << 'PY'
+import json, pathlib
+p=pathlib.Path('holdings.json')
+print(p.read_text('utf-8') if p.is_file() else 'holdings.json not found')
+PY
 
-      - name: Push strategy (opening)
-        if: startsWith( github.event.schedule, '50 1' )
-        env:
-          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SCKEY: ${{ secrets.SCKEY }}
-        run: |
-          python daily_push_qwen.py --slot open
+      - name: Run collector (news_pipeline.py)
+        run: python news_pipeline.py
 
-      - name: Push strategy (noon)
-        if: startsWith( github.event.schedule, '20 3' )
-        env:
-          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SCKEY: ${{ secrets.SCKEY }}
-        run: |
-          python daily_push_qwen.py --slot noon
+      - name: Run pusher (daily_push_qwen.py)
+        run: python daily_push_qwen.py
 
-      - name: Push strategy (close)
-        if: startsWith( github.event.schedule, '05 7' )
-        env:
-          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SCKEY: ${{ secrets.SCKEY }}
-        run: |
-          python daily_push_qwen.py --slot close
+      - name: Upload artifacts (outputs + logs)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: news-artifacts
+          if-no-files-found: ignore
+          path: |
+            briefing.txt
+            news_all.csv
+            keywords_used.txt
+            qwen_keywords.txt
+            sources_used.txt
+            errors.log
+            logs-and-history-*.zip
