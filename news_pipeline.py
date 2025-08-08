@@ -5,12 +5,13 @@ news_pipeline.py — RSS 主采集器 + 关键词驱动筛选 + 源健康度自�
 - 备用：可选 NewsAPI / 聚合数据（如配置了 key）
 - 失败源记录：errors.log + sources_health.json
 - 连续失败 ≥2 次：自动拉黑，下一轮跳过；日志里说明原因
+- ENV 白/黑名单 + 自定义源：RSS_WHITELIST / RSS_BLACKLIST / RSS_EXTRA
 - 输出：
     briefing.txt        # 给 LLM：仅 时间 + 来源 + 标题（不带 URL/摘要）
     news_all.csv        # 全量明细，UTF-8-SIG
     keywords_used.txt   # 最终关键词（中文）
     qwen_keywords.txt   # Qwen 生成的原始关键词（便于核查）
-    sources_used.txt    # 实际尝试的 RSS/接口列表（含成功条数）
+    sources_used.txt    # 实际尝试的源 + 统计 + 白/黑/自定义配置
     errors.log          # 详细错误
     sources_health.json # 源健康度（连续失败计数/最近错误）
 """
@@ -40,6 +41,11 @@ MAX_CONCURRENCY = 8
 QWEN_API_KEY    = os.getenv("QWEN_API_KEY")
 NEWSAPI_KEY     = os.getenv("NEWSAPI_KEY")     # 可选
 JUHE_KEY        = os.getenv("JUHE_KEY")        # 可选
+
+# 新增：白/黑名单 & 自定义源
+ENV_RSS_WHITELIST = os.getenv("RSS_WHITELIST", "").strip()
+ENV_RSS_BLACKLIST = os.getenv("RSS_BLACKLIST", "").strip()
+ENV_RSS_EXTRA     = os.getenv("RSS_EXTRA", "").strip()
 
 # ── 工具 ────────────────────────────────────────────────────────────────────
 def now() -> str:
@@ -72,10 +78,15 @@ def uniq_keep_order(items):
             seen.add(x); out.append(x)
     return out
 
+def parse_csv_env(s: str) -> list[str]:
+    if not s: return []
+    # 逗号/空格/分号都接受
+    parts = re.split(r"[,\s;]+", s.strip())
+    return [p for p in (x.strip() for x in parts) if p]
+
 # ── 源清单（主力 RSS） ──────────────────────────────────────────────────────
-# 说明：尽量用官方 RSS；没有就走 RSSHub 镜像（可能偶发失效，已做健康度自愈）
+# 说明：用 sid 做唯一键，白/黑名单都用它
 RSS_SOURCES_PRIMARY = [
-    # —— 综合财经/主流媒体
     ("FT中文",            "ft_cn",    "https://www.ftchinese.com/rss/news"),
     ("界面新闻",          "jiemian",  "https://a.jiemian.com/index.php?m=article&a=rss"),
     ("新浪财经(热榜)",    "sina",     "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
@@ -85,14 +96,14 @@ RSS_SOURCES_PRIMARY = [
     ("财联社(镜像)",      "cls",      "https://rsshub.app/cls/telegraph"),
     ("第一财经(镜像)",    "yicai",    "https://rsshub.app/yicai/brief"),
 
-    # —— 监管/交易所（公告/新闻）
-    ("中国证监会(镜像)",   "csrc",     "https://rsshub.app/csrc/news"),             # 监管动态
-    ("上交所公告(镜像)",   "sse",      "https://rsshub.app/sse/renewal"),           # 若失效会记录并拉黑
+    # 监管/交易所/公告
+    ("中国证监会(镜像)",   "csrc",     "https://rsshub.app/csrc/news"),
+    ("上交所公告(镜像)",   "sse",      "https://rsshub.app/sse/renewal"),
     ("深交所公告(镜像)",   "szse",     "https://rsshub.app/szse/notice"),
     ("巨潮公告-最新(镜像)","cninfo",   "https://rsshub.app/cninfo/announcement"),
 
-    # —— 行业垂媒（半导体/医药/期货等）
-    ("半导体行业观察(镜像)","ic",       "https://rsshub.app/icpcw/semiconductor"),  # 半导体行业观察镜像（若失效会拉黑）
+    # 行业垂媒
+    ("半导体行业观察(镜像)","ic",       "https://rsshub.app/icpcw/semiconductor"),
     ("药智网(镜像)",       "yaozhi",   "https://rsshub.app/yaozh/news"),
     ("期货日报(镜像)",     "qhrb",     "https://rsshub.app/qhrb/zhongyao"),
     ("中国基金报(镜像)",   "cfund",    "https://rsshub.app/fund/163"),
@@ -101,7 +112,7 @@ RSS_SOURCES_PRIMARY = [
     ("钛媒体(镜像)",       "tmt",      "https://rsshub.app/tmtpost")
 ]
 
-# 备选源（用于顶替被拉黑的主源）
+# 备选源
 RSS_SOURCES_BACKUP = [
     ("上证报(镜像)",       "ssepaper", "https://rsshub.app/zzxw/article"),
     ("中证网(镜像)",       "cs",       "https://rsshub.app/cs/news"),
@@ -211,23 +222,64 @@ def update_health(h: dict, sid: str, ok: bool, err: str | None):
     st["last_time"] = now()
     h[sid] = st
 
+def parse_extra_sources(s: str) -> list[tuple[str,str,str]]:
+    """
+    RSS_EXTRA: "名称|id|url;名称2|id2|url2"
+    """
+    out=[]
+    if not s: return out
+    parts = [p for p in s.split(";") if p.strip()]
+    for p in parts:
+        seg = [x.strip() for x in p.split("|")]
+        if len(seg) != 3 or not seg[2].startswith("http"):
+            log_err(f"RSS_EXTRA 无效条目: {p}")
+            continue
+        out.append((seg[0], seg[1], seg[2]))
+    return out
+
 def select_sources_with_health() -> list[tuple[str,str,str]]:
     health = load_json(HEALTH, {})
+
+    wl = set(parse_csv_env(ENV_RSS_WHITELIST))
+    bl = set(parse_csv_env(ENV_RSS_BLACKLIST))
+    extra = parse_extra_sources(ENV_RSS_EXTRA)
+
+    # 1) 基础源集合
+    base = list(RSS_SOURCES_PRIMARY)
+
+    # 2) 追加自定义源（视为主源）
+    if extra:
+        base += extra
+
+    # 3) 应用白名单（若有）
+    if wl:
+        base = [t for t in base if t[1] in wl]
+
+    # 4) 应用黑名单（若有）
+    if bl:
+        base = [t for t in base if t[1] not in bl]
+
+    # 5) 健康度过滤（连续失败≥2）
     selected = []
     skipped  = []
-    for name,sid,url in RSS_SOURCES_PRIMARY:
-        if health.get(sid,{}).get("fail",0) >= 2:
-            skipped.append((name,sid,url))
+    for name, sid, url in base:
+        if health.get(sid, {}).get("fail", 0) >= 2:
+            skipped.append((name, sid, url))
             continue
-        selected.append((name,sid,url))
-    for name,sid,url in RSS_SOURCES_BACKUP:
-        if len(selected) >= len(RSS_SOURCES_PRIMARY):
-            break
-        if health.get(sid,{}).get("fail",0) >= 2:
-            continue
-        selected.append((name,sid,url))
-    for n,s,u in skipped:
+        selected.append((name, sid, url))
+
+    for n, s, u in skipped:
         log_err(f"跳过源（连续失败≥2）: {n} [{s}] {u}")
+
+    # 把白/黑/自定义设置写进 sources_used.txt 方便核查
+    _append_text(OUT_SRC, f"Whitelist: {', '.join(sorted(wl)) if wl else '(none)'}\n")
+    _append_text(OUT_SRC, f"Blacklist: {', '.join(sorted(bl)) if bl else '(none)'}\n")
+    if extra:
+        _append_text(OUT_SRC, "Extra sources:\n")
+        for n,s,u in extra:
+            _append_text(OUT_SRC, f"  + {n} [{s}] {u}\n")
+    _append_text(OUT_SRC, "----\n")
+
     return selected
 
 # ── 备用 API（可选） ────────────────────────────────────────────────────────
@@ -314,7 +366,7 @@ async def main():
                 items = await fetch_rss(name,sid,url,client)
                 ok = len(items) > 0
                 update_health(health, sid, ok, None if ok else "no_items")
-                _append_text(OUT_SRC, f"RSS {name} {url} — {len(items)} 条\n")
+                _append_text(OUT_SRC, f"RSS {name} [{sid}] {url} — {len(items)} 条\n")
                 return items
         rss_batches = await asyncio.gather(*[task(n,s,u) for n,s,u in selected])
         rss_items = [it for b in rss_batches for it in b]
@@ -335,17 +387,17 @@ async def main():
     news_all = rss_items + news_all
     print(f"{now()} - 收集完成：全量 {len(news_all)} 条（未去重）")
 
-    # 筛选（标题+摘要；不抓正文，保证稳/快）
+    # 筛选（标题+摘要）
     filtered = [x for x in news_all if (not final_kw) or hit_by_keywords(x, final_kw)]
     print(f"{now()} - 标题/摘要命中后保留 {len(filtered)} 条（命中≥1 关键词）")
 
-    # CSV（UTF-8-SIG，防止 Excel 乱码）
+    # CSV（UTF-8-SIG）
     with OUT_CSV.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f); w.writerow(["published","source","title","url"])
         for it in filtered:
             w.writerow([it.get("published",""), it.get("source",""), it.get("title",""), it.get("url","")])
 
-    # briefing：仅 时间 + 来源 + 标题（不带 URL）
+    # briefing：仅 时间 + 来源 + 标题
     lines = [f"# 新闻清单（近 {SPAN_DAYS} 天，共 {len(filtered)} 条）\n"]
     def kpub(x): return x.get("published","")
     for it in sorted(filtered, key=kpub, reverse=True):
