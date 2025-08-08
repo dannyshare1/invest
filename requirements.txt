@@ -6,3 +6,4 @@ pyyaml
 requests
 beautifulsoup4
 lxml
+charset-normalizer
