@@ -1,28 +1,35 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py — RSS 主采集器 + 关键词驱动筛选 + 源健康度自愈
-- 主力：RSS 源（中文为主，含交易所/监管/巨潮公告、行业垂媒）
-- 备用：可选 NewsAPI / 聚合数据（如配置了 key）
-- 失败源记录：errors.log + sources_health.json
-- 连续失败 ≥2 次：自动拉黑，下一轮跳过；日志里说明原因
-- ENV 白/黑名单 + 自定义源：RSS_WHITELIST / RSS_BLACKLIST / RSS_EXTRA
-- 输出：
+news_pipeline.py — RSS 外置源文件 + 关键词筛选 + 源健康度自愈/自动剔除
+- RSS 源不再写死在代码，改为从 sources.yml（优先）或 sources.txt 读取
+- 手动在源文件中添加/删除/修改条目，脚本下次运行自动生效
+- 连续失败 ≥3（抓取异常或0条）→ 自动从源文件剔除，并记录到 errors.log
+- 仍输出：
     briefing.txt        # 给 LLM：仅 时间 + 来源 + 标题（不带 URL/摘要）
-    news_all.csv        # 全量明细，UTF-8-SIG
+    news_all.csv        # 全量明细（UTF-8-SIG，防止 Excel 乱码）
     keywords_used.txt   # 最终关键词（中文）
-    qwen_keywords.txt   # Qwen 生成的原始关键词（便于核查）
-    sources_used.txt    # 实际尝试的源 + 统计 + 白/黑/自定义配置
+    qwen_keywords.txt   # Qwen 生成的原始关键词
+    sources_used.txt    # 实际尝试的 RSS/接口列表（含成功条数）
     errors.log          # 详细错误
-    sources_health.json # 源健康度（连续失败计数/最近错误）
+    sources_health.json # 源健康度（连续失败/最近错误）
 """
 from __future__ import annotations
 import os, re, csv, json, asyncio, time
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Tuple
 import httpx
 import feedparser
+import yaml  # PyYAML
 
-# ── 输出路径 ────────────────────────────────────────────────────────────────
+# ── 常量 & 输出路径 ─────────────────────────────────────────────────────────
+TZ = timezone(timedelta(hours=8))  # 北京时间
+SPAN_DAYS = int(os.getenv("SPAN_DAYS", "3"))
+REQ_TIMEOUT = 15.0
+RSS_PER_SOURCE_LIMIT = 80
+MAX_CONCURRENCY = 8
+FAIL_REMOVE_THRESHOLD = 3  # 连续失败≥3次，自动从源文件剔除
+
 OUT_BRI = Path("briefing.txt")
 OUT_CSV = Path("news_all.csv")
 OUT_KW  = Path("keywords_used.txt")
@@ -31,23 +38,41 @@ OUT_SRC = Path("sources_used.txt")
 ERR_LOG = Path("errors.log")
 HEALTH  = Path("sources_health.json")
 
-# ── 配置 ────────────────────────────────────────────────────────────────────
-TZ = timezone(timedelta(hours=8))  # 北京时间
-SPAN_DAYS = int(os.getenv("SPAN_DAYS", "3"))
-REQ_TIMEOUT = 15.0
-RSS_PER_SOURCE_LIMIT = 80
-MAX_CONCURRENCY = 8
+SFILE_YML = Path("sources.yml")   # 优先读取
+SFILE_TXT = Path("sources.txt")   # 备选：每行 name|sid|url（竖线分隔）
 
+# 可选的备用 API（代码保留，不动）
 QWEN_API_KEY    = os.getenv("QWEN_API_KEY")
 NEWSAPI_KEY     = os.getenv("NEWSAPI_KEY")     # 可选
 JUHE_KEY        = os.getenv("JUHE_KEY")        # 可选
 
-# 新增：白/黑名单 & 自定义源
-ENV_RSS_WHITELIST = os.getenv("RSS_WHITELIST", "").strip()
-ENV_RSS_BLACKLIST = os.getenv("RSS_BLACKLIST", "").strip()
-ENV_RSS_EXTRA     = os.getenv("RSS_EXTRA", "").strip()
+# ── 默认内置源（仅用于首次自动初始化 sources.yml，用完就靠外部文件） ─────────────
+DEFAULT_RSS_SOURCES: List[Dict[str, str]] = [
+    # —— 综合财经/主流媒体
+    {"name":"FT中文", "sid":"ft_cn", "url":"https://www.ftchinese.com/rss/news"},
+    {"name":"界面新闻", "sid":"jiemian", "url":"https://a.jiemian.com/index.php?m=article&a=rss"},
+    {"name":"新浪财经(热榜)", "sid":"sina", "url":"https://rss.sina.com.cn/roll/finance/hot_roll.xml"},
+    {"name":"财新(镜像)", "sid":"caixin", "url":"https://rsshub.app/caixin/latest"},
+    {"name":"华尔街见闻(镜像)", "sid":"wallst", "url":"https://rsshub.app/wallstreetcn/news"},
+    {"name":"证券时报(镜像)", "sid":"stcn", "url":"https://rsshub.app/stcn/news"},
+    {"name":"财联社(镜像)", "sid":"cls", "url":"https://rsshub.app/cls/telegraph"},
+    {"name":"第一财经(镜像)", "sid":"yicai", "url":"https://rsshub.app/yicai/brief"},
+    # —— 监管/交易所/巨潮
+    {"name":"中国证监会(镜像)", "sid":"csrc", "url":"https://rsshub.app/csrc/news"},
+    {"name":"上交所公告(镜像)", "sid":"sse", "url":"https://rsshub.app/sse/renewal"},
+    {"name":"深交所公告(镜像)", "sid":"szse", "url":"https://rsshub.app/szse/notice"},
+    {"name":"巨潮公告-最新(镜像)", "sid":"cninfo", "url":"https://rsshub.app/cninfo/announcement"},
+    # —— 行业垂媒
+    {"name":"半导体行业观察(镜像)", "sid":"ic", "url":"https://rsshub.app/icpcw/semiconductor"},
+    {"name":"药智网(镜像)", "sid":"yaozhi", "url":"https://rsshub.app/yaozh/news"},
+    {"name":"期货日报(镜像)", "sid":"qhrb", "url":"https://rsshub.app/qhrb/zhongyao"},
+    {"name":"中国基金报(镜像)", "sid":"cfund", "url":"https://rsshub.app/fund/163"},
+    {"name":"经济观察报(镜像)", "sid":"eeo", "url":"https://rsshub.app/eeo/yaowen"},
+    {"name":"36氪快讯(镜像)", "sid":"36kr", "url":"https://rsshub.app/36kr/newsflashes"},
+    {"name":"钛媒体(镜像)", "sid":"tmt", "url":"https://rsshub.app/tmtpost"},
+]
 
-# ── 工具 ────────────────────────────────────────────────────────────────────
+# ── 小工具 ─────────────────────────────────────────────────────────────────
 def now() -> str:
     return datetime.now(TZ).isoformat(timespec="seconds")
 
@@ -78,48 +103,86 @@ def uniq_keep_order(items):
             seen.add(x); out.append(x)
     return out
 
-def parse_csv_env(s: str) -> list[str]:
-    if not s: return []
-    # 逗号/空格/分号都接受
-    parts = re.split(r"[,\s;]+", s.strip())
-    return [p for p in (x.strip() for x in parts) if p]
+# ── 源文件：加载 / 保存 / 初始化 / 自动剔除 ─────────────────────────────────────
+def init_sources_file_if_needed() -> List[Dict[str,str]]:
+    """若 sources.yml / sources.txt 都不存在，则写入默认 YAML。"""
+    if SFILE_YML.exists() or SFILE_TXT.exists():
+        return []
+    yaml.safe_dump(DEFAULT_RSS_SOURCES, SFILE_YML.open("w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
+    return DEFAULT_RSS_SOURCES
 
-# ── 源清单（主力 RSS） ──────────────────────────────────────────────────────
-# 说明：用 sid 做唯一键，白/黑名单都用它
-RSS_SOURCES_PRIMARY = [
-    ("FT中文",            "ft_cn",    "https://www.ftchinese.com/rss/news"),
-    ("界面新闻",          "jiemian",  "https://a.jiemian.com/index.php?m=article&a=rss"),
-    ("新浪财经(热榜)",    "sina",     "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
-    ("财新(镜像)",        "caixin",   "https://rsshub.app/caixin/latest"),
-    ("华尔街见闻(镜像)",  "wallst",   "https://rsshub.app/wallstreetcn/news"),
-    ("证券时报(镜像)",    "stcn",     "https://rsshub.app/stcn/news"),
-    ("财联社(镜像)",      "cls",      "https://rsshub.app/cls/telegraph"),
-    ("第一财经(镜像)",    "yicai",    "https://rsshub.app/yicai/brief"),
+def load_sources_from_txt() -> List[Dict[str,str]]:
+    rows=[]
+    for line in SFILE_TXT.read_text("utf-8").splitlines():
+        line=line.strip()
+        if not line or line.startswith("#"): continue
+        # 支持  name|sid|url  或者  url（自动生成 sid）
+        if "|" in line:
+            parts=[p.strip() for p in line.split("|")]
+            if len(parts) >= 3:
+                rows.append({"name":parts[0], "sid":parts[1], "url":"|".join(parts[2:]).strip()})
+        else:
+            url=line
+            sid=re.sub(r"[^a-z0-9]+","_", url.lower())
+            rows.append({"name":url, "sid":sid[:32], "url":url})
+    return rows
 
-    # 监管/交易所/公告
-    ("中国证监会(镜像)",   "csrc",     "https://rsshub.app/csrc/news"),
-    ("上交所公告(镜像)",   "sse",      "https://rsshub.app/sse/renewal"),
-    ("深交所公告(镜像)",   "szse",     "https://rsshub.app/szse/notice"),
-    ("巨潮公告-最新(镜像)","cninfo",   "https://rsshub.app/cninfo/announcement"),
+def load_sources() -> Tuple[List[Dict[str,str]], str]:
+    """优先 YAML；无则 TXT；都没有则初始化 YAML（用内置默认）"""
+    init_sources_file_if_needed()
+    if SFILE_YML.exists():
+        try:
+            data = yaml.safe_load(SFILE_YML.read_text("utf-8")) or []
+            rows=[]
+            for d in data:
+                if not isinstance(d, dict): continue
+                name=d.get("name") or d.get("title") or "未命名源"
+                sid =(d.get("sid") or re.sub(r"[^a-z0-9]+","_", (d.get('url') or '').lower())[:32]).strip()
+                url =(d.get("url") or "").strip()
+                if url:
+                    rows.append({"name":name.strip(), "sid":sid, "url":url})
+            return rows, "yml"
+        except Exception as e:
+            log_err(f"读取 sources.yml 失败: {type(e).__name__}: {e}")
+            # 回退：若存在 TXT 尝试 TXT，否则返回默认内置
+    if SFILE_TXT.exists():
+        try:
+            rows = load_sources_from_txt()
+            return rows, "txt"
+        except Exception as e:
+            log_err(f"读取 sources.txt 失败: {type(e).__name__}: {e}")
+    # 都失败：直接用默认（不落盘，避免覆盖用户文件）
+    return DEFAULT_RSS_SOURCES[:], "default"
 
-    # 行业垂媒
-    ("半导体行业观察(镜像)","ic",       "https://rsshub.app/icpcw/semiconductor"),
-    ("药智网(镜像)",       "yaozhi",   "https://rsshub.app/yaozh/news"),
-    ("期货日报(镜像)",     "qhrb",     "https://rsshub.app/qhrb/zhongyao"),
-    ("中国基金报(镜像)",   "cfund",    "https://rsshub.app/fund/163"),
-    ("经济观察报(镜像)",   "eeo",      "https://rsshub.app/eeo/yaowen"),
-    ("36氪快讯(镜像)",     "36kr",     "https://rsshub.app/36kr/newsflashes"),
-    ("钛媒体(镜像)",       "tmt",      "https://rsshub.app/tmtpost")
-]
+def save_sources(sources: List[Dict[str,str]], mode: str):
+    """按原始介质保存（优先 yml；如果本轮是 default，写回 yml）。"""
+    if mode == "txt" and SFILE_TXT.exists() and not SFILE_YML.exists():
+        # 写回 TXT（name|sid|url）
+        lines=[]
+        for s in sources:
+            lines.append(f"{s['name']}|{s['sid']}|{s['url']}")
+        SFILE_TXT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        # 其他情况统一写回 YAML
+        yaml.safe_dump(sources, SFILE_YML.open("w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
 
-# 备选源
-RSS_SOURCES_BACKUP = [
-    ("上证报(镜像)",       "ssepaper", "https://rsshub.app/zzxw/article"),
-    ("中证网(镜像)",       "cs",       "https://rsshub.app/cs/news"),
-    ("证券日报(镜像)",     "zqrb",     "https://rsshub.app/zqrb/stock")
-]
+def remove_failed_sources_if_needed(health: dict, sources: List[Dict[str,str]], mode: str) -> List[Dict[str,str]]:
+    """连续失败≥阈值则从源列表中剔除并写回文件。"""
+    keep=[]; removed=[]
+    for s in sources:
+        sid=s["sid"]
+        fails = health.get(sid,{}).get("fail",0)
+        if fails >= FAIL_REMOVE_THRESHOLD:
+            removed.append(s)
+        else:
+            keep.append(s)
+    if removed:
+        save_sources(keep, mode)
+        for s in removed:
+            log_err(f"源已剔除（连续失败≥{FAIL_REMOVE_THRESHOLD}）：{s['name']} [{s['sid']}] {s['url']}")
+    return keep
 
-# ── 关键词构建 ───────────────────────────────────────────────────────────────
+# ── 关键词构建（跟原先一致） ────────────────────────────────────────────────
 def load_holdings() -> list[dict]:
     p = Path("holdings.json")
     if p.is_file():
@@ -159,8 +222,8 @@ async def qwen_expand_keywords(holds: list[dict]) -> list[str]:
     if not QWEN_API_KEY:
         return []
     prompt = (
-        "请根据以下 ETF 持仓名称和行业，生成 50-120 个中文关键词，和50-120个英文关键词"
-        "，用中文逗号分隔，聚焦行业/主题/政策/产品名等：\n"
+        "请根据以下 ETF 持仓名称和行业，生成 50-120 个**中文**关键词，"
+        "每个 2~4 个字为主，用中文逗号分隔，聚焦行业/主题/政策/产品名等：\n"
         + "\n".join(f"- {h.get('name','')} {h.get('symbol','')}" for h in holds)
         + "\n只输出关键词，不要解释。"
     )
@@ -180,7 +243,7 @@ async def qwen_expand_keywords(holds: list[dict]) -> list[str]:
     OUT_QW.write_text("\n".join(uniq_keep_order(kws)), encoding="utf-8")
     return uniq_keep_order(kws)
 
-# ── RSS 抓取/健康度 ─────────────────────────────────────────────────────────
+# ── 抓取 & 健康度 ───────────────────────────────────────────────────────────
 async def fetch_rss(name: str, sid: str, url: str, client: httpx.AsyncClient) -> list[dict]:
     try:
         r = await client.get(url, timeout=REQ_TIMEOUT)
@@ -222,67 +285,7 @@ def update_health(h: dict, sid: str, ok: bool, err: str | None):
     st["last_time"] = now()
     h[sid] = st
 
-def parse_extra_sources(s: str) -> list[tuple[str,str,str]]:
-    """
-    RSS_EXTRA: "名称|id|url;名称2|id2|url2"
-    """
-    out=[]
-    if not s: return out
-    parts = [p for p in s.split(";") if p.strip()]
-    for p in parts:
-        seg = [x.strip() for x in p.split("|")]
-        if len(seg) != 3 or not seg[2].startswith("http"):
-            log_err(f"RSS_EXTRA 无效条目: {p}")
-            continue
-        out.append((seg[0], seg[1], seg[2]))
-    return out
-
-def select_sources_with_health() -> list[tuple[str,str,str]]:
-    health = load_json(HEALTH, {})
-
-    wl = set(parse_csv_env(ENV_RSS_WHITELIST))
-    bl = set(parse_csv_env(ENV_RSS_BLACKLIST))
-    extra = parse_extra_sources(ENV_RSS_EXTRA)
-
-    # 1) 基础源集合
-    base = list(RSS_SOURCES_PRIMARY)
-
-    # 2) 追加自定义源（视为主源）
-    if extra:
-        base += extra
-
-    # 3) 应用白名单（若有）
-    if wl:
-        base = [t for t in base if t[1] in wl]
-
-    # 4) 应用黑名单（若有）
-    if bl:
-        base = [t for t in base if t[1] not in bl]
-
-    # 5) 健康度过滤（连续失败≥2）
-    selected = []
-    skipped  = []
-    for name, sid, url in base:
-        if health.get(sid, {}).get("fail", 0) >= 2:
-            skipped.append((name, sid, url))
-            continue
-        selected.append((name, sid, url))
-
-    for n, s, u in skipped:
-        log_err(f"跳过源（连续失败≥2）: {n} [{s}] {u}")
-
-    # 把白/黑/自定义设置写进 sources_used.txt 方便核查
-    _append_text(OUT_SRC, f"Whitelist: {', '.join(sorted(wl)) if wl else '(none)'}\n")
-    _append_text(OUT_SRC, f"Blacklist: {', '.join(sorted(bl)) if bl else '(none)'}\n")
-    if extra:
-        _append_text(OUT_SRC, "Extra sources:\n")
-        for n,s,u in extra:
-            _append_text(OUT_SRC, f"  + {n} [{s}] {u}\n")
-    _append_text(OUT_SRC, "----\n")
-
-    return selected
-
-# ── 备用 API（可选） ────────────────────────────────────────────────────────
+# ── 备用 API（保留，未改动） ────────────────────────────────────────────────
 async def fetch_newsapi(keys: list[str], client: httpx.AsyncClient) -> list[dict]:
     if not NEWSAPI_KEY: return []
     q = " OR ".join(keys[:10]) or "宏观 OR 市场"
@@ -329,6 +332,8 @@ async def fetch_juhe(client: httpx.AsyncClient) -> list[dict]:
 
 # ── 关键词匹配（标题+摘要） ─────────────────────────────────────────────────
 def hit_by_keywords(item: dict, kws: list[str]) -> bool:
+    if not kws:  # 无关键词时不过滤
+        return True
     txt = f"{item.get('title','')} {item.get('summary','')}"
     for w in kws:
         if w and w in txt:
@@ -339,7 +344,10 @@ def hit_by_keywords(item: dict, kws: list[str]) -> bool:
 async def main():
     ERR_LOG.write_text("", encoding="utf-8")  # 每次跑清空旧错误
 
-    print(f"{now()} - 开始收集（近 {SPAN_DAYS} 天），调用 Qwen 生成补充关键词")
+    print(f"{now()} - 开始收集（近 {SPAN_DAYS} 天），从源文件读取 RSS 列表")
+    sources, mode = load_sources()
+    print(f"{now()} - 源文件模式: {mode}；共 {len(sources)} 个 RSS 源")
+
     holds = load_holdings()
     print(f"{now()} - 读取持仓：holdings.json 共 {len(holds)} 条")
 
@@ -353,26 +361,29 @@ async def main():
     if qk: print(f"{now()} - Qwen 生成关键词 {len(qk)} 个")
     print(f"{now()} - 最终关键词 {len(final_kw)} 个，已写 keywords_used.txt / sources_used.txt")
 
-    since = datetime.now(TZ) - timedelta(days=SPAN_DAYS)
     health = load_json(HEALTH, {})
-    selected = select_sources_with_health()
-
     news_all = []
+
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT, headers={"User-Agent":"Mozilla/5.0"}) as client:
-        # RSS 并发
+        # RSS 并发抓取
         sem = asyncio.Semaphore(MAX_CONCURRENCY)
-        async def task(name,sid,url):
+        async def task(src):
+            name, sid, url = src["name"], src["sid"], src["url"]
             async with sem:
-                items = await fetch_rss(name,sid,url,client)
+                items = await fetch_rss(name, sid, url, client)
                 ok = len(items) > 0
                 update_health(health, sid, ok, None if ok else "no_items")
-                _append_text(OUT_SRC, f"RSS {name} [{sid}] {url} — {len(items)} 条\n")
-                return items
-        rss_batches = await asyncio.gather(*[task(n,s,u) for n,s,u in selected])
-        rss_items = [it for b in rss_batches for it in b]
+                _append_text(OUT_SRC, f"RSS {name} {url} — {len(items)} 条\n")
+                return items, src, ok
+
+        batches = await asyncio.gather(*[task(s) for s in sources])
+        rss_items = []
+        for items, src, ok in batches:
+            rss_items.extend(items)
+
         print(f"{now()} - RSS 抓到 {len(rss_items)} 条（未筛）")
 
-        # 备用 API
+        # 备用 API（可选）
         api_total = 0
         if JUHE_KEY:
             juhe = await fetch_juhe(client); api_total += len(juhe); news_all += juhe
@@ -387,8 +398,8 @@ async def main():
     news_all = rss_items + news_all
     print(f"{now()} - 收集完成：全量 {len(news_all)} 条（未去重）")
 
-    # 筛选（标题+摘要）
-    filtered = [x for x in news_all if (not final_kw) or hit_by_keywords(x, final_kw)]
+    # 筛选（标题+摘要；不抓正文）
+    filtered = [x for x in news_all if hit_by_keywords(x, final_kw)]
     print(f"{now()} - 标题/摘要命中后保留 {len(filtered)} 条（命中≥1 关键词）")
 
     # CSV（UTF-8-SIG）
@@ -397,7 +408,7 @@ async def main():
         for it in filtered:
             w.writerow([it.get("published",""), it.get("source",""), it.get("title",""), it.get("url","")])
 
-    # briefing：仅 时间 + 来源 + 标题
+    # briefing：仅 时间 + 来源 + 标题（不带 URL）
     lines = [f"# 新闻清单（近 {SPAN_DAYS} 天，共 {len(filtered)} 条）\n"]
     def kpub(x): return x.get("published","")
     for it in sorted(filtered, key=kpub, reverse=True):
@@ -405,8 +416,13 @@ async def main():
         lines.append(f"- {ts} [{it.get('source','')}] {it.get('title','').strip()}")
     OUT_BRI.write_text("\n".join(lines), encoding="utf-8")
 
-    # 健康度入库
+    # 保存健康度
     save_json(HEALTH, health)
+
+    # 自动剔除：连续失败≥阈值
+    sources_after = remove_failed_sources_if_needed(health, sources, mode)
+    if len(sources_after) != len(sources):
+        print(f"{now()} - 已从源文件移除 {len(sources) - len(sources_after)} 个连续失败的源")
 
     # 兜底提示
     if len(news_all) == 0:
