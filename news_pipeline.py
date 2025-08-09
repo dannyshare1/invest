@@ -1,42 +1,108 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py — RSS 主力采集器（自更新 sources.yml 版）
-- 仅使用 sources.yml 维护/自愈源清单：成功→ trusted:true, consec_fail=0；失败或0条→ consec_fail+1；
-  consec_fail>=3 且非 keep:true → 直接从 sources.yml 移除
-- briefing.txt：仅写 “YYYY-MM-DD [来源] 标题”
-- news_all.csv：UTF-8-SIG（Excel 友好，不乱码）
+news_pipeline.py — 仅 RSS 采集版（sources.yml 驱动）
+功能
+----
+1) 从仓库根目录的 sources.yml 读取 RSS 源列表（列表结构，不需要 enabled/trusted/lang）。
+2) 逐源抓取，成功/失败都会更新 sources.yml：
+   - 成功(有条目)：consec_fail=0, last_ok=now, last_error=None
+   - 失败/0条：consec_fail+=1, last_error=简述
+   - 连续失败≥3 且 keep!=true -> 直接从 sources.yml 删除该源
+3) 输出：
+   - briefing.txt：每行 “YYYY-MM-DD HH:MM | 来源 | 标题”（不含 URL，不含摘要）
+   - news_all.csv：UTF-8-SIG，含 date, source, title, link（CSV里保留链接，方便人工溯源）
+   - errors.log：记录解析异常/HTTP问题/0条等原因
+4) 纯 RSS，不依赖任何外部 News API/LLM。
+
+依赖:
+    pip install feedparser PyYAML
 """
-
 from __future__ import annotations
-import asyncio, csv, os, re, sys
+import sys, csv
 from pathlib import Path
+from typing import List, Dict, Tuple, Optional
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple
-import httpx
-import yaml
 import feedparser
-from dateutil import parser as dtparse
+import yaml
+import time
+import html
+from email.utils import parsedate_to_datetime
 
-# ── sources.yml 管理（精简版） ─────────────────────────────────────────────
-from pathlib import Path
-import datetime as _dt
-import feedparser, yaml
-
+# ── 常量 ──────────────────────────────────────────────────────────────
 SRC_YML = Path("sources.yml")
-FAIL_CUTOFF = 3  # 连续失败/0条 达到阈值且 keep!=true → 删除
+OUT_CSV = Path("news_all.csv")
+OUT_BRI = Path("briefing.txt")
+ERR_LOG = Path("errors.log")
+FAIL_CUTOFF = 3  # 连续失败/0条 达到阈值，且 keep!=true → 删除
 
-def _now_iso():
-    return _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+# ── 工具函数 ──────────────────────────────────────────────────────────
+def now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
-def load_sources():
-    """读取 sources.yml；若不存在则写一个空模板。返回 list[dict]."""
+def log_err(msg: str):
+    line = f"{now()} - {msg}\n"
+    ERR_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with ERR_LOG.open("a", encoding="utf-8") as f:
+        f.write(line)
+    print(line, end="")
+
+def safe_unescape(s: str) -> str:
+    if not s:
+        return ""
+    return html.unescape(s).strip()
+
+def parse_rss_datetime(entry) -> Tuple[Optional[str], Optional[float]]:
+    """
+    返回 (iso_str, epoch)；都可能 None。
+    优先 published_parsed，其次 updated_parsed，否则 None。
+    """
+    dt = None
+    if getattr(entry, "published_parsed", None):
+        dt = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc).astimezone()
+    elif getattr(entry, "updated_parsed", None):
+        dt = datetime.fromtimestamp(time.mktime(entry.updated_parsed), tz=timezone.utc).astimezone()
+    else:
+        # 部分源只给 RFC822 字符串（极少）
+        txt = getattr(entry, "published", "") or getattr(entry, "updated", "")
+        try:
+            if txt:
+                dt = parsedate_to_datetime(txt)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.astimezone()
+        except Exception:
+            dt = None
+    if not dt:
+        return None, None
+    return dt.isoformat(timespec="seconds"), dt.timestamp()
+
+# ── sources.yml 读写（兼容 root 为 list 或 dict{'sources':[...] }） ───────────
+def load_sources() -> Tuple[List[Dict], str]:
+    """
+    返回 (sources_list, root_kind)
+    root_kind ∈ {'list','dict'}，保存时保持原结构。
+    """
     if not SRC_YML.is_file():
+        # 初次创建一个空列表
         SRC_YML.write_text("[]\n", encoding="utf-8")
-        return []
-    data = yaml.safe_load(SRC_YML.read_text("utf-8")) or []
-    # 兜底默认值 & 清理废字段
-    out = []
-    for s in data:
+        return [], "list"
+
+    data = yaml.safe_load(SRC_YML.read_text(encoding="utf-8"))
+    if isinstance(data, dict) and "sources" in data:
+        raw = data.get("sources") or []
+        root = "dict"
+    elif isinstance(data, list):
+        raw = data
+        root = "list"
+    else:
+        raw = []
+        root = "list"
+
+    # 归一化 & 去除遗留无用字段
+    out: List[Dict] = []
+    for s in raw:
+        if not isinstance(s, dict):
+            continue
         out.append({
             "key": s.get("key"),
             "name": s.get("name"),
@@ -46,33 +112,32 @@ def load_sources():
             "last_ok": s.get("last_ok"),
             "last_error": s.get("last_error"),
         })
-    return out
+    return out, root
 
-def save_sources(sources: list[dict]):
-    """写回 sources.yml（保留字段次序；UTF-8）。"""
+def save_sources(sources: List[Dict], root_kind: str):
+    """保持源文件的根结构(list 或 dict)写回，并保持字段顺序。"""
+    payload = {"sources": sources} if root_kind == "dict" else sources
     SRC_YML.write_text(
-        yaml.safe_dump(sources, allow_unicode=True, sort_keys=False),
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
 
-def mark_result(sources: list[dict], key: str, ok: bool, err_msg: str | None = None):
-    """根据结果更新 consec_fail / last_ok / last_error。"""
+def mark_result(sources: List[Dict], key: str, ok: bool, err_msg: Optional[str] = None):
     for s in sources:
-        if s["key"] == key:
+        if s.get("key") == key:
             if ok:
                 s["consec_fail"] = 0
-                s["last_ok"] = _now_iso()
+                s["last_ok"] = now()
                 s["last_error"] = None
             else:
                 s["consec_fail"] = int(s.get("consec_fail", 0)) + 1
                 s["last_error"] = (err_msg or "unknown error")[:300]
-            break
+            return
 
-def prune_sources(sources: list[dict], logger_print=print):
-    """删除连续失败达到阈值的源（keep=true 除外）。返回是否有改动。"""
-    before = len(sources)
-    kept = []
-    removed = []
+def prune_sources(sources: List[Dict]) -> List[Dict]:
+    """不保留 keep==True 的失败源，删除 consec_fail>=FAIL_CUTOFF 的其他源。返回被删除的列表。"""
+    removed: List[Dict] = []
+    kept: List[Dict] = []
     for s in sources:
         if s.get("keep", False):
             kept.append(s)
@@ -82,240 +147,132 @@ def prune_sources(sources: list[dict], logger_print=print):
         else:
             kept.append(s)
     if removed:
-        for r in removed:
-            logger_print(f"⚠️  移除源（连续失败 ≥{FAIL_CUTOFF}）：{r['key']} {r['name']} {r.get('url')}")
+        print(f"{now()} - ⚠️ 将从 sources.yml 移除 {len(removed)} 个不健康源（连续失败≥{FAIL_CUTOFF}）")
     sources[:] = kept
-    return len(sources) != before
+    return removed
 
-async def fetch_rss_via_sources(logger_print=print) -> list[dict]:
+# ── RSS 抓取 ───────────────────────────────────────────────────────────
+def fetch_one_rss(name: str, url: str) -> Tuple[List[Dict], Optional[str]]:
     """
-    从 sources.yml 读取 RSS 列表，逐个抓取。
-    - 成功（解析正常且条目数>0）→ consec_fail=0
-    - 失败 或 0条 → consec_fail+1
-    - 跑完执行 prune + save，返回 items（不去重）
-    item 结构：{source_key, source_name, title, link, published, summary}
+    抓取单个 RSS。返回 (items, error)
+    items: [{source_key, source_name, title, link, published, published_ts}]
+    error: None 表示成功；否则返回错误简述（包括 0 条的场景）
     """
-    sources = load_sources()
-    items: list[dict] = []
-    for s in sources:
-        key, name, url = s["key"], s["name"], s["url"]
-        try:
-            fp = feedparser.parse(url)
-            # feedparser 认为解析异常会设置 bozo=True
-            if getattr(fp, "bozo", False):
-                err = getattr(fp, "bozo_exception", None)
-                mark_result(sources, key, ok=False, err_msg=f"bozo:{type(err).__name__ if err else ''}")
-                logger_print(f"RSS 失败（解析）：{name} {url}")
-                continue
-            entries = fp.entries or []
-            if not entries:
-                mark_result(sources, key, ok=False, err_msg="zero entries")
-                logger_print(f"RSS 0条：{name} {url}")
-                continue
-            mark_result(sources, key, ok=True)
-            # 统一抽取字段
-            for e in entries:
-                items.append({
-                    "source_key": key,
-                    "source_name": name,
-                    "title": getattr(e, "title", "").strip(),
-                    "link": getattr(e, "link", ""),
-                    "published": getattr(e, "published", "") or getattr(e, "updated", ""),
-                    "summary": getattr(e, "summary", "") or getattr(e, "description", ""),
-                })
-            logger_print(f"RSS 成功：{name} 抓到 {len(entries)} 条")
-        except Exception as ex:
-            mark_result(sources, key, ok=False, err_msg=f"{type(ex).__name__}: {ex}")
-            logger_print(f"RSS 失败（异常）：{name} {url}")
-    # 清理与保存
-    changed = prune_sources(sources, logger_print=logger_print)
-    save_sources(sources)
-    if changed:
-        logger_print("已更新 sources.yml（移除不健康源或刷新状态）")
-    return items
-
-
-# ── 路径 / 常量 ────────────────────────────────────────────────────────────────
-ROOT = Path(__file__).parent
-SOURCE_FILE = Path(os.getenv("SOURCE_FILE", ROOT / "sources.yml"))
-OUT_BRIEF = ROOT / "briefing.txt"
-OUT_CSV = ROOT / "news_all.csv"
-OUT_ERR = ROOT / "errors.log"
-OUT_USED = ROOT / "sources_used.txt"
-
-UA = "Mozilla/5.0 (compatible; invest-newsbot/1.0; +https://example.invalid)"
-TZ = timezone.utc
-
-def now() -> str:
-    return datetime.now(TZ).astimezone().isoformat(timespec="seconds")
-
-# ── I/O 辅助 ──────────────────────────────────────────────────────────────────
-def load_sources() -> List[Dict]:
-    if not SOURCE_FILE.is_file():
-        raise FileNotFoundError(f"sources.yml 不存在：{SOURCE_FILE}")
-    data = yaml.safe_load(SOURCE_FILE.read_text("utf-8")) or {}
-    items: List[Dict] = data.get("sources", [])
-    # 兜底字段
-    for s in items:
-        s.setdefault("key", re.sub(r"\W+", "_", s.get("name", "src")).lower())
-        s.setdefault("enabled", True)
-        s.setdefault("keep", False)
-        s.setdefault("trusted", False)
-        s.setdefault("consec_fail", 0)
-        s.setdefault("lang", "zh")
-    return items
-
-def save_sources(sources: List[Dict]):
-    # 排序：enabled 优先、keep/trusted 优先，字母序
-    sources_sorted = sorted(
-        sources,
-        key=lambda s: (
-            not s.get("enabled", True),
-            not (s.get("keep") or s.get("trusted")),
-            s.get("name", ""),
-        ),
-    )
-    yaml.safe_dump(
-        {"sources": sources_sorted},
-        (ROOT / "sources.yml").open("w", encoding="utf-8"),
-        allow_unicode=True,
-        sort_keys=False,
-        width=1000,
-        default_flow_style=False,
-    )
-
-def log_err(msg: str):
-    OUT_ERR.parent.mkdir(parents=True, exist_ok=True)
-    with OUT_ERR.open("a", encoding="utf-8") as f:
-        f.write(f"{now()} - {msg}\n")
-
-# ── 解析 & 规范化 ─────────────────────────────────────────────────────────────
-def as_date_str(entry: dict) -> str:
-    for k in ("published", "updated", "dc_date"):
-        v = entry.get(k)
-        if v:
-            try:
-                return dtparse.parse(v).date().isoformat()
-            except Exception:
-                pass
-    return datetime.now().date().isoformat()
-
-def clean_text(s: str) -> str:
-    if not s:
-        return ""
-    # 去除多余空白 & 控制字符
-    s = re.sub(r"[\u0000-\u001F\u007F]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-# ── 抓取 ──────────────────────────────────────────────────────────────────────
-async def fetch_rss(src: Dict, client: httpx.AsyncClient) -> Tuple[str, List[Dict], str]:
-    """
-    返回: (key, items, err)
-      - items: [{'date','source','title'}...]
-      - err: 空串表示成功；非空为错误描述
-    """
-    key, name, url = src["key"], src["name"], src["url"]
     try:
-        r = await client.get(url, headers={"User-Agent": UA}, timeout=20, follow_redirects=True)
-        r.raise_for_status()
-        # feedparser 自动探测编码；用 text 以保留原始字符
-        feed = feedparser.parse(r.text)
+        fp = feedparser.parse(url, request_headers={
+            "User-Agent": "Mozilla/5.0 (compatible; NewsCollector/1.0; +https://example.org)",
+            "Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        })
+        if getattr(fp, "bozo", False):
+            be = getattr(fp, "bozo_exception", None)
+            return [], f"bozo:{type(be).__name__ if be else ''}"
+        entries = fp.entries or []
+        if not entries:
+            return [], "zero entries"
         items: List[Dict] = []
-        for e in feed.entries:
-            title = clean_text(e.get("title", ""))
-            if not title:
-                continue
-            date_str = as_date_str(e)
-            items.append({"date": date_str, "source": name, "title": title})
-        return key, items, ""
-    except Exception as e:
-        return key, [], f"{name}({key}) ERR: {type(e).__name__}: {e}"
+        for e in entries:
+            iso, ts = parse_rss_datetime(e)
+            items.append({
+                "source_key": name,      # 展示用：直接放 name
+                "source_name": name,
+                "title": safe_unescape(getattr(e, "title", "")),
+                "link": getattr(e, "link", "") or "",
+                "published": iso or "",
+                "published_ts": ts or 0.0,
+            })
+        return items, None
+    except Exception as ex:
+        return [], f"{type(ex).__name__}: {ex}"
 
-# ── 主流程 ────────────────────────────────────────────────────────────────────
+# ── 输出写入 ───────────────────────────────────────────────────────────
+def write_csv(items: List[Dict]):
+    """news_all.csv 用 UTF-8-SIG 防 Excel 乱码。"""
+    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+    with OUT_CSV.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["date", "source", "title", "link"])
+        for it in items:
+            w.writerow([
+                it.get("published", ""),
+                it.get("source_name", ""),
+                it.get("title", ""),
+                it.get("link", ""),
+            ])
+
+def write_briefing(items: List[Dict]):
+    """
+    briefing.txt：每行 “YYYY-MM-DD HH:MM | 来源 | 标题”
+    不含 URL，不含摘要，避免 LLM 误点链接。
+    """
+    OUT_BRI.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for it in items:
+        dt = it.get("published", "")
+        short = dt.replace("T", " ").split("+")[0][:16] if dt else ""
+        lines.append(f"{short} | {it.get('source_name','')} | {it.get('title','')}")
+    OUT_BRI.write_text("\n".join(lines), encoding="utf-8")
+
+# ── 主流程 ─────────────────────────────────────────────────────────────
 async def main():
     print(f"{now()} - 开始收集（仅 RSS）")
-    sources = [s for s in load_sources() if s.get("enabled", True)]
-    print(f"{now()} - sources.yml 读取 {len(sources)} 条（enabled）")
 
-    # 并发抓取
-    used_count: Dict[str, int] = {}
-    errors: List[str] = []
+    sources, root_kind = load_sources()
+    if not sources:
+        print(f"{now()} - sources.yml 为空；请在仓库根目录添加 RSS 源。")
+        # 仍写空文件，保持流程稳定
+        write_csv([])
+        write_briefing([])
+        ERR_LOG.write_text("", encoding="utf-8")
+        return
+
     all_items: List[Dict] = []
+    errors_happened = False
 
-    async with httpx.AsyncClient() as client:
-        tasks = [fetch_rss(s, client) for s in sources]
-        for coro in asyncio.as_completed(tasks):
-            key, items, err = await coro
-            src = next((x for x in sources if x["key"] == key), None)
-            if not src:
-                continue
-            if err:
-                errors.append(err)
-                src["consec_fail"] = int(src.get("consec_fail", 0)) + 1
-                used_count[key] = 0
-                print(f"{now()} - {src['name']} 抓取失败/0条，consec_fail={src['consec_fail']}")
-            else:
-                cnt = len(items)
-                all_items.extend(items)
-                used_count[key] = cnt
-                if cnt > 0:
-                    src["trusted"] = True
-                    src["consec_fail"] = 0
-                    print(f"{now()} - {src['name']} 抓到 {cnt} 条")
-                else:
-                    src["consec_fail"] = int(src.get("consec_fail", 0)) + 1
-                    print(f"{now()} - {src['name']} 0 条，consec_fail={src['consec_fail']}")
-
-    # 写 outputs
-    all_items.sort(key=lambda x: (x["date"], x["source"], x["title"]), reverse=True)
-    # briefing.txt：YYYY-MM-DD [来源] 标题
-    with OUT_BRIEF.open("w", encoding="utf-8") as f:
-        for it in all_items:
-            f.write(f"{it['date']} [{it['source']}] {it['title']}\n")
-
-    # news_all.csv：UTF-8-SIG（避免中文在 Excel 乱码）
-    with OUT_CSV.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["date", "source", "title"])
-        for it in all_items:
-            w.writerow([it["date"], it["source"], it["title"]])
-
-    # errors.log / sources_used.txt
-    OUT_ERR.write_text("", encoding="utf-8")  # 先清空
-    if errors:
-        for e in errors:
-            log_err(e)
-    with OUT_USED.open("w", encoding="utf-8") as f:
-        for s in sources:
-            f.write(f"{s['key']}\t{s['name']}\t{used_count.get(s['key'], 0)}\n")
-
-    print(f"{now()} - 收集完成：共 {len(all_items)} 条；errors.log {OUT_ERR.stat().st_size if OUT_ERR.exists() else 0} bytes")
-
-    # 自愈：连续3次失败/0条的（且非 keep/trusted）直接从 sources.yml 删除；成功过的打 trusted:true
-    before = len(sources)
-    pruned: List[str] = []
-    survivors: List[Dict] = []
     for s in sources:
-        cf = int(s.get("consec_fail", 0))
-        keep = bool(s.get("keep", False))
-        trusted = bool(s.get("trusted", False))
-        if cf >= 3 and not keep and not trusted:
-            pruned.append(f"{s['name']}({s['key']}) consec_fail={cf} → 移除")
+        key = s.get("key") or s.get("name") or s.get("url")
+        name = s.get("name") or key
+        url = s.get("url")
+        if not url:
+            mark_result(sources, key, ok=False, err_msg="missing url")
+            log_err(f"RSS 失败：{name} 缺少 URL")
+            errors_happened = True
             continue
-        survivors.append(s)
 
-    if pruned:
-        for p in pruned:
-            print(f"{now()} - 剔除源：{p}")
+        items, err = fetch_one_rss(name=name, url=url)
+        if err is None:
+            mark_result(sources, key, ok=True)
+            all_items.extend(items)
+            print(f"{now()} - RSS 成功：{name} 抓到 {len(items)} 条")
+        else:
+            mark_result(sources, key, ok=False, err_msg=err)
+            log_err(f"RSS 失败：{name} {url} | {err}")
+            errors_happened = True
 
-    save_sources(survivors)
-    print(f"{now()} - sources.yml 已更新：{before} → {len(survivors)}（成功的已置 trusted:true；乏力源已剔除）")
-    print(f"{now()} - collector 任务完成")
+    # 裁剪不健康源 & 保存 sources.yml（保持原根结构）
+    removed = prune_sources(sources)
+    save_sources(sources, root_kind)
+    if removed:
+        for r in removed:
+            print(f"{now()} - 已从 sources.yml 移除：{r.get('name') or r.get('key')} ({r.get('url')})")
+
+    # 排序：按发布时间倒序（无时间置后）
+    all_items.sort(key=lambda x: (x.get("published_ts") or 0.0), reverse=True)
+
+    # 写输出
+    write_csv(all_items)
+    write_briefing(all_items)
+
+    # 如果这轮没有任何失败/0条，清空上一轮的 errors.log；否则保留累加
+    if not errors_happened:
+        ERR_LOG.write_text("", encoding="utf-8")
+
+    print(f"{now()} - 收集完成：共 {len(all_items)} 条；briefing/news_all 已写入")
+    print(f"{now()} - errors.log 大小 {ERR_LOG.stat().st_size if ERR_LOG.exists() else 0} bytes")
 
 if __name__ == "__main__":
     try:
+        import asyncio
         asyncio.run(main())
-    except Exception as e:
-        log_err(f"FATAL: {type(e).__name__}: {e}")
-        raise
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
