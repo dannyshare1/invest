@@ -159,8 +159,8 @@ async def qwen_expand_keywords(holds: list[dict]) -> list[str]:
     if not QWEN_API_KEY:
         return []
     prompt = (
-        "请根据以下 ETF 持仓名称和行业，生成 50-120 个**中文**关键词，"
-        "每个 2~4 个字为主，用中文逗号分隔，聚焦行业/主题/政策/产品名等：\n"
+        "请根据以下 ETF 持仓名称和行业，生成 50-120 个中文关键词，和50-120个英文关键词"
+        "，用中文逗号分隔，聚焦行业/主题/政策/产品名等：\n"
         + "\n".join(f"- {h.get('name','')} {h.get('symbol','')}" for h in holds)
         + "\n只输出关键词，不要解释。"
     )
