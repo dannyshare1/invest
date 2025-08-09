@@ -74,3 +74,5 @@ jobs:
             sources_used.txt
             sources_health.json
             errors.log
+            sources.yml
+
