@@ -1,0 +1,38 @@
+name: Migrate sources.yml
+
+on:
+  workflow_dispatch: {}   # 手动运行
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # 允许回写仓库
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install pyyaml
+
+      - name: Run migration script
+        run: python migrate_sources_yml.py   # 脚本放在仓库根目录
+
+      - name: Commit & push changes
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add sources.yml sources.yml.bak-* || true
+            git commit -m "chore: migrate sources.yml via workflow"
+            git push
+          else
+            echo "No changes to commit."
+          fi
