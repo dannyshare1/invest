@@ -1,77 +1,21 @@
-- key: 36kr_flash
-  name: 36氪快讯(镜像)
-  url: https://rsshub.app/36kr/newsflashes
-  keep: false
-  consec_fail: 2
-  last_ok: null
-  last_error: HTTP 429
-- key: caixin_latest
-  name: 财新(镜像)
-  url: https://rsshub.app/caixin/latest
-  keep: false
-  consec_fail: 2
-  last_ok: null
-  last_error: HTTP 429
 - key: cls_telegraph
   name: 财联社(快讯镜像)
   url: https://rsshub.app/cls/telegraph
   keep: false
-  consec_fail: 2
-  last_ok: null
-  last_error: 'ReadTimeout: '
-- key: cninfo_latest
-  name: 巨潮公告-最新(镜像)
-  url: https://rsshub.app/cninfo/announcement/latest
-  keep: false
-  consec_fail: 2
-  last_ok: null
-  last_error: HTTP 503
-- key: csrc
-  name: 中国证监会(镜像)
-  url: https://rsshub.app/csrc/news
-  keep: false
-  consec_fail: 2
-  last_ok: null
-  last_error: HTTP 429
+  consec_fail: 0
+  last_ok: 2025-08-11T15:21:20+0800
+  last_error: null
 - key: ft_cn
   name: FT中文
   url: https://www.ftchinese.com/rss/news
   keep: false
-  consec_fail: 1
-  last_ok: 2025-08-11T13:24:50+0800
-  last_error: HTTP 502
+  consec_fail: 0
+  last_ok: 2025-08-11T15:21:20+0800
+  last_error: null
 - key: jiemian
   name: 界面新闻
   url: https://a.jiemian.com/index.php?m=article&a=rss
   keep: false
   consec_fail: 0
-  last_ok: 2025-08-11T14:27:10+0800
+  last_ok: 2025-08-11T15:21:20+0800
   last_error: null
-- key: sina_hot
-  name: 新浪财经(热榜)
-  url: https://rss.sina.com.cn/roll/finance/hot_roll.xml
-  keep: false
-  consec_fail: 2
-  last_ok: null
-  last_error: 0 items
-- key: stcn
-  name: 证券时报(镜像)
-  url: https://rsshub.app/stcn/news
-  keep: false
-  consec_fail: 2
-  last_ok: null
-  last_error: HTTP 429
-- key: wallstreetcn
-  name: 华尔街见闻(镜像)
-  url: https://rsshub.app/wallstreetcn/news/global
-  keep: false
-  consec_fail: 2
-  last_ok: null
-  last_error: HTTP 429
-- key: yicai_brief
-  name: 第一财经(镜像)
-  url: https://rsshub.app/yicai/brief
-  keep: false
-  consec_fail: 2
-  last_ok: null
-  last_error: HTTP 429
