@@ -7,7 +7,7 @@ on:
     - cron: '0 1-8 * * 1-5'
 
 permissions:
-  contents: write
+  contents: write  # 允许回写 sources.yml
 
 jobs:
   run:
@@ -15,27 +15,26 @@ jobs:
     timeout-minutes: 25
 
     env:
+      # 必需 / 可选密钥（按你仓库 Secrets 来）
       QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
-      JUHE_KEY: ${{ secrets.JUHE_KEY }}
-      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       SCKEY: ${{ secrets.SCKEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      SPAN_DAYS: "3"
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+      MEDIASTACK_KEY: ${{ secrets.MEDIASTACK_KEY }}
+      JUHE_KEY: ${{ secrets.JUHE_KEY }}
 
-      # ↓↓↓ 新增：源白名单/黑名单/自定义
-      # 说明：使用 “sid” 值（见 news_pipeline.py 源表）
-      # 仅用这些源（留空=不启用白名单）
-      RSS_WHITELIST: ""
-      # 排除这些源（留空=不启用黑名单）
-      RSS_BLACKLIST: ""
-      # 追加自定义 RSS 源：用分号分隔多条，每条格式：名称|id|url
-      # 例如： "某行业媒体|myind|https://example.com/rss;国际监管|regint|https://rsshub.app/xxx"
-      RSS_EXTRA: ""
+      # 采集器参数（保持与你脚本一致）
+      CHINESE_ONLY: "1"
+      API_MAX_PAGES: "2"
+      API_BATCH_KW: "6"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -46,6 +45,8 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
+          # 保险起见（有些环境没锁定）
+          pip install feedparser pyyaml httpx
 
       - name: Show holdings
         run: |
@@ -55,13 +56,20 @@ jobs:
       - name: Run collector (news_pipeline.py)
         run: python news_pipeline.py
 
-      - name: Run pusher (daily_push_qwen.py)
+      - name: Commit updated sources.yml (if changed)
         run: |
-          if [ -f "daily_push_qwen.py" ]; then
-            python daily_push_qwen.py || true
+          if git diff --quiet --exit-code -- sources.yml; then
+            echo "sources.yml unchanged."
           else
-            echo "daily_push_qwen.py not found, skip push."
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add sources.yml
+            git commit -m "chore: update sources.yml (auto)"
+            git push
           fi
+
+      - name: Run pusher (daily_push_qwen.py)
+        run: python daily_push_qwen.py || true
 
       - name: Upload artifacts (outputs + logs)
         uses: actions/upload-artifact@v4
@@ -75,14 +83,6 @@ jobs:
             keywords_used.txt
             qwen_keywords.txt
             sources_used.txt
-            sources_health.json
             errors.log
             sources.yml
-
-      - name: Commit updated sources.yml back to repo
-        if: always()
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: update sources.yml (auto from job)"
-          file_pattern: sources.yml
-          branch: ${{ github.ref_name }}
+          retention-days: 7
