@@ -6,6 +6,9 @@ on:
     # 工作日白天每小时跑一次采集 + 推送（UTC 1-8点 ~ 北京 09:00-16:00）
     - cron: '0 1-8 * * 1-5'
 
+permissions:
+  contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -76,3 +79,10 @@ jobs:
             errors.log
             sources.yml
 
+      - name: Commit updated sources.yml back to repo
+        if: always()
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update sources.yml (auto from job)"
+          file_pattern: sources.yml
+          branch: ${{ github.ref_name }}
