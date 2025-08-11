@@ -104,6 +104,7 @@ def build_prompt(holds: List[Dict], briefing: str) -> str:
     1) 先给出 3-5 条市场要点。
     2) 对每个持仓标的给出“维持/加仓/减仓/调仓”及 ≤50 字理由。
     3) 如有新的定投机会或风险提示，请列出。
+    """).strip()
 
 async def main():
     holds = load_holdings()
