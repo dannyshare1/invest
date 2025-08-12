@@ -1,36 +1,35 @@
+# Daily News & Investment Pipeline
 
-# Daily News Fetcher
+一组 Python 脚本，用于抓取市场资讯、记录持仓变动，并生成每日投资提示。
 
-Python scripts to fetch latest news from Caixin and Sina, extract the first paragraph as summary,
-and output a **news.json** file for downstream processing / push notifications.
+## 脚本介绍
 
-## Directory layout
+- `news_pipeline.py`
+  - 根据 `sources.yml` 中的 RSS 源和可选 API，结合 `holdings.json` 自动生成关键词
+  - 抓取新闻并输出 `briefing.txt`、`news_all.csv` 等文件，同时维护源的健康状态
+- `holdings_tracker.py`
+  - 比较 `holdings.json` 与历史快照，记录持仓增删改
+  - 更新 `holdings_log.csv`、`holdings_history.csv`
+- `daily_push_qwen.py`
+  - 读取 `briefing.txt` 与当前持仓
+  - 调用通义千问生成中文投资提示，并通过 Server 酱或 Telegram 推送
 
-```
-.
-├── fetchers/
-│   ├── caixin_news_fetcher.py
-│   ├── sina_news_fetcher.py
-│   └── __init__.py
-├── compile_news.py
-├── requirements.txt
-└── .github/
-    └── workflows/
-        └── daily_push.yml
-```
-
-## Usage
+## 使用示例
 
 ```bash
 pip install -r requirements.txt
-python compile_news.py
+
+# 更新持仓或源配置后依次运行：
+python news_pipeline.py      # 抓取并过滤新闻
+python holdings_tracker.py   # 记录持仓变化
+python daily_push_qwen.py    # 生成并推送提示
 ```
 
-The generated `news.json` will contain fields:
+`news_pipeline.py` 会输出：
+- `briefing.txt`
+- `news_all.csv`
+- `keywords_used.txt` / `qwen_keywords.txt`
+- `sources_used.txt`
+- `errors.log`
 
-* `title`
-* `url`
-* `summary`
-* `source`
-* `published_at`
-* `fetched_at`
+若需推送或调用额外 API，请设置相关环境变量（如 `QWEN_API_KEY`、`NEWSAPI_KEY`、`MEDIASTACK_KEY`、`JUHE_KEY`、`SCKEY`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`）。
