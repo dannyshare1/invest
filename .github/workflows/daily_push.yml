@@ -51,9 +51,9 @@ jobs:
         run: |
           echo "holdings.json content (masked weights):"
           python - << 'PY'
-            import json, pathlib
-            p=pathlib.Path('holdings.json')
-            print(p.read_text('utf-8') if p.is_file() else 'holdings.json not found')
+          import json, pathlib
+          p=pathlib.Path('holdings.json')
+          print(p.read_text('utf-8') if p.is_file() else 'holdings.json not found')
           PY
 
       - name: Run collector (news_pipeline.py)
