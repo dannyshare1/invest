@@ -3,11 +3,17 @@ name: Collector and Push
 on:
   workflow_dispatch:
   schedule:
-    # 工作日白天每小时跑一次采集 + 推送（UTC 1-8点 ~ 北京 09:00-16:00）
-    - cron: '0 1-8 * * 1-5'
+    # 北京时间 09:00 → UTC 01:00
+    - cron: '0 1 * * 1-5'
+    # 北京时间 12:00 → UTC 04:00
+    - cron: '0 4 * * 1-5'
+    # 北京时间 14:30 → UTC 06:30
+    - cron: '30 6 * * 1-5'
+    # 北京时间 16:00 → UTC 08:00
+    - cron: '0 8 * * 1-5'
 
 permissions:
-  contents: write  # 允许回写 sources.yml
+  contents: write  # 允许把 sources.yml 的 ok/失败计数回写
 
 jobs:
   run:
@@ -15,26 +21,23 @@ jobs:
     timeout-minutes: 25
 
     env:
-      # 必需 / 可选密钥（按你仓库 Secrets 来）
+      # 推送与关键词扩展所需
       QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+      JUHE_KEY: ${{ secrets.JUHE_KEY }}
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       SCKEY: ${{ secrets.SCKEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
-      MEDIASTACK_KEY: ${{ secrets.MEDIASTACK_KEY }}
-      JUHE_KEY: ${{ secrets.JUHE_KEY }}
 
-      # 采集器参数（保持与你脚本一致）
-      CHINESE_ONLY: "1"
-      API_MAX_PAGES: "2"
-      API_BATCH_KW: "6"
+      # 采集器的可调参数（保持原值）
+      SPAN_DAYS: 3
+      RSS_WHITELIST:
+      RSS_BLACKLIST:
+      RSS_EXTRA:
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -45,31 +48,26 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
-          # 保险起见（有些环境没锁定）
-          pip install feedparser pyyaml httpx
 
       - name: Show holdings
         run: |
-          echo "holdings.json content:"
-          if [ -f holdings.json ]; then cat holdings.json; else echo "holdings.json not found"; fi
+          echo "holdings.json content (masked weights):"
+          python - << 'PY'
+import json, pathlib
+p=pathlib.Path('holdings.json')
+print(p.read_text('utf-8') if p.is_file() else 'holdings.json not found')
+PY
 
       - name: Run collector (news_pipeline.py)
         run: python news_pipeline.py
 
-      - name: Commit updated sources.yml (if changed)
-        run: |
-          if git diff --quiet --exit-code -- sources.yml; then
-            echo "sources.yml unchanged."
-          else
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add sources.yml
-            git commit -m "chore: update sources.yml (auto)"
-            git push
-          fi
-
       - name: Run pusher (daily_push_qwen.py)
-        run: python daily_push_qwen.py || true
+        run: |
+          if [ -f "daily_push_qwen.py" ]; then
+            python daily_push_qwen.py || true
+          else
+            echo "daily_push_qwen.py not found, skip push."
+          fi
 
       - name: Upload artifacts (outputs + logs)
         uses: actions/upload-artifact@v4
@@ -84,5 +82,18 @@ jobs:
             qwen_keywords.txt
             sources_used.txt
             errors.log
+            logs-and-history-*.zip
             sources.yml
-          retention-days: 7
+
+      - name: Commit back updated sources.yml (ok/失败次数回写)
+        if: always()
+        run: |
+          if git diff --quiet --exit-code sources.yml; then
+            echo "No sources.yml changes to commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add sources.yml
+            git commit -m "chore: auto-update sources.yml (ok flags / fail counters)"
+            git push
+          fi
