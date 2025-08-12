@@ -145,10 +145,20 @@ def load_sources() -> List[Dict]:
     if not SRC_FILE.is_file():
         logger.warning("sources.yml 不存在，使用空列表")
         return []
-    data = yaml.safe_load(SRC_FILE.read_text("utf-8")) or []
+    try:
+        data = yaml.safe_load(SRC_FILE.read_text("utf-8")) or []
+    except yaml.YAMLError as e:
+        logger.warning(f"sources.yml 解析失败：{e}")
+        return []
     items = data if isinstance(data, list) else data.get("sources", [])
+    if not isinstance(items, list):
+        logger.warning("sources.yml 格式错误，使用空列表")
+        return []
     normed = []
     for it in items or []:
+        if not isinstance(it, dict):
+            logger.warning(f"忽略无效源：{it}")
+            continue
         d = {
             "key": it.get("key"),
             "name": it.get("name", it.get("key", "")),
