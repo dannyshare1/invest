@@ -1,19 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py — RSS 收集 + 关键词过滤（中文）+ 源健康自动维护 + API 备源
+news_pipeline.py — RSS 收集 + 关键词过滤（中英文）+ 源健康自动维护 + API 备源
 
 输出文件
 --------
 - briefing.txt           # 仅“命中关键词”的简报（每行：日期  来源 | 标题）
 - news_all.csv           # 抓到的全部新闻（未去重），UTF-8 with BOM，便于 Excel
 - keywords_used.txt      # 最终关键词（基础中文词 + Qwen 扩展去重）
-- qwen_keywords.txt      # Qwen 仅扩展的中文关键词（若失败则为空）
+- qwen_keywords.txt      # Qwen 扩展的关键词（中英混合；若失败则为空）
 - sources_used.txt       # 每个源抓取条数（all/hit/status），RSS 源会参与健康状态回写
 - errors.log             # 详细错误日志（HTTP/解析/0条等）
 
-RSS 源配置
----------
-- sources.yml  顶层即为 list，每项：
+RSS 源配置（sources.yml）
+------------------------
+- 顶层即为 list，每项：
   - key: 唯一键
     name: 名称
     url: RSS 地址
@@ -21,17 +21,19 @@ RSS 源配置
     consec_fail: 0  # 连续失败计数（失败含 0 条）
     last_ok:
     last_error:
-    ok: false       # ✅ 新增：只要成功抓到过一次，就自动写成 true（无需你手动改）
+    ok: false       # 只要成功抓到过一次，就会自动写成 true
 
 行为
 ----
 - 并发抓取 RSS；失败（含 0 条）则 consec_fail +=1 并写 last_error；成功则 consec_fail=0、写 last_ok、并把 ok=true
 - 若 consec_fail >= 3 且 keep != true → 从 sources.yml 中移除该源
-- 若设置了以下可选 API key，会在 RSS 之后追加抓取：
+- 若设置以下可选 API key，会在 RSS 之后追加抓取（限定近 SPAN_DAYS 天）：
     NEWSAPI_KEY     → NewsAPI everything
     MEDIASTACK_KEY  → mediastack news
     JUHE_KEY        → 聚合数据财经资讯（fapigx/caijing/query）
-- 关键词：从 holdings.json 生成基础中文词；如有 QWEN_API_KEY，则用通义千问扩展 2~4 字中文词
+- 关键词：
+    1) 从 holdings.json 生成“基础中文”关键词；
+    2) 如有 QWEN_API_KEY → 让通义千问生成**中英文**关键词，合并去重。
 """
 from __future__ import annotations
 import asyncio, csv, json, logging, os, re
@@ -43,12 +45,12 @@ import feedparser, httpx, yaml
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
 TZ = timezone(timedelta(hours=8))
-DAYS_LOOKBACK = 3
-REQ_TIMEOUT   = httpx.Timeout(20.0, read=30.0)
-HEADERS       = {
+SPAN_DAYS    = max(1, int(os.getenv("SPAN_DAYS", "7")))  # 近一周
+REQ_TIMEOUT  = httpx.Timeout(20.0, read=30.0)
+HEADERS      = {
     "User-Agent": "Mozilla/5.0 (RSSCollector; +https://github.com/)",
     "Accept": "*/*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
 }
 
 # 输出文件
@@ -60,12 +62,14 @@ OUT_QW       = Path("qwen_keywords.txt")
 OUT_SRC_USED = Path("sources_used.txt")
 OUT_ERR      = Path("errors.log")
 
-# 可选 API key
+# 可选 API key & 语言策略
 QWEN_API_KEY     = os.getenv("QWEN_API_KEY", "").strip()
 NEWSAPI_KEY      = os.getenv("NEWSAPI_KEY", "").strip()
 MEDIASTACK_KEY   = os.getenv("MEDIASTACK_KEY", "").strip()
 JUHE_KEY         = os.getenv("JUHE_KEY", "").strip()
-CHINESE_ONLY     = os.getenv("CHINESE_ONLY", "1").strip() == "1"
+CHINESE_ONLY     = os.getenv("CHINESE_ONLY", "0").strip() == "1"  # 默认开放英文
+
+# API 分页/批次
 API_MAX_PAGES    = max(1, int(os.getenv("API_MAX_PAGES", "2")))
 API_BATCH_KW     = max(3, int(os.getenv("API_BATCH_KW", "6")))
 
@@ -86,11 +90,23 @@ def is_chinese_word(s: str) -> bool:
     s = s.strip()
     return bool(s) and all("\u4e00" <= ch <= "\u9fff" for ch in s)
 
+def is_english_word(s: str) -> bool:
+    """较宽松判定：允许空格/连字符/斜杠，长度 2~24。"""
+    s = s.strip()
+    if not s or len(s) < 2 or len(s) > 24:
+        return False
+    return bool(re.match(r"^[A-Za-z0-9][A-Za-z0-9 .+/\-]{1,23}$", s))
+
+def is_keyword(s: str) -> bool:
+    s = s.strip()
+    return (is_chinese_word(s) and 2 <= len(s) <= 6) or is_english_word(s)
+
 def uniq_keep_order(seq):
     seen, out = set(), []
     for x in seq:
         x = x.strip()
-        if not x or x in seen: continue
+        if not x or x in seen:
+            continue
         seen.add(x); out.append(x)
     return out
 
@@ -138,7 +154,7 @@ def load_sources() -> List[Dict]:
             "consec_fail": int(it.get("consec_fail", 0)),
             "last_ok": it.get("last_ok"),
             "last_error": it.get("last_error"),
-            "ok": bool(it.get("ok", False)),   # ✅ 新增
+            "ok": bool(it.get("ok", False)),
         }
         if d["key"] and d["url"]:
             normed.append(d)
@@ -148,7 +164,7 @@ def save_sources(items: List[Dict]) -> None:
     items = sorted(items, key=lambda x: (not x.get("keep", False), x.get("key", "")))
     SRC_FILE.write_text(yaml.safe_dump(items, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
-# ── 关键词（与你之前的一致）─────────────────────────────────────────────────
+# ── 关键词（基础中文 + Qwen 扩展中英）────────────────────────────────────────
 def load_holdings() -> List[dict]:
     p = Path("holdings.json")
     if p.is_file():
@@ -159,6 +175,7 @@ def load_holdings() -> List[dict]:
     return []
 
 def base_keywords_from_holdings(holds: List[dict]) -> Tuple[List[str], List[str]]:
+    """基础关键词仍以中文为主，保持和你之前一致。"""
     sectors = set()
     words: List[str] = []
     for h in holds:
@@ -184,14 +201,14 @@ async def qwen_expand_keywords(holds: List[dict]) -> List[str]:
     if not QWEN_API_KEY:
         return []
     prompt = (
-        "请根据以下 ETF 持仓名称或行业，生成 50-120 个**中文**关键词，每个以 2~4 个字为主；"
-        "聚焦行业/主题/政策/产品名/热点名词，用中文逗号分隔：\n"
+        "根据以下 ETF 持仓名称或行业，生成 80-160 个**中英文**关键词（混合输出），"
+        "以 2~4 个字/词为主，使用中文或英文逗号分隔；聚焦行业/主题/政策/产品/热点：\n"
         + "\n".join(f"- {h.get('name','')} {h.get('symbol','')}" for h in holds)
-        + "\n只输出关键词，用中文逗号分隔，不要任何解释。"
+        + "\n只输出关键词，逗号分隔，不要任何解释。"
     )
     API = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     hdr = {"Content-Type":"application/json","Authorization":f"Bearer {QWEN_API_KEY}"}
-    pl  = {"model":"qwen-plus","input":{"prompt":prompt},"parameters":{"max_tokens":650,"temperature":0.7}}
+    pl  = {"model":"qwen-plus","input":{"prompt":prompt},"parameters":{"max_tokens":800,"temperature":0.7}}
     try:
         async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
             r = await c.post(API, headers=hdr, json=pl); r.raise_for_status()
@@ -199,10 +216,11 @@ async def qwen_expand_keywords(holds: List[dict]) -> List[str]:
     except Exception as e:
         logger.error(f"Qwen 调用失败: {type(e).__name__}: {e}")
         return []
-    raw = re.split(r"[，,\s]+", text)
-    kws = [w.strip() for w in raw if is_chinese_word(w.strip()) and 2 <= len(w.strip()) <= 6]
-    OUT_QW.write_text("\n".join(uniq_keep_order(kws)) or "", encoding="utf-8")
-    return uniq_keep_order(kws)
+    raw = re.split(r"[，,;\n]+", text)
+    kws = [w.strip() for w in raw if is_keyword(w.strip())]
+    kws = uniq_keep_order(kws)
+    OUT_QW.write_text("\n".join(kws) if kws else "", encoding="utf-8")
+    return kws
 
 # ── RSS 抓取 ──────────────────────────────────────────────────────────────────
 async def fetch_rss_source(client: httpx.AsyncClient, src: Dict) -> Tuple[str, List[Dict], str | None]:
@@ -218,10 +236,11 @@ async def fetch_rss_source(client: httpx.AsyncClient, src: Dict) -> Tuple[str, L
             be = getattr(parsed, "bozo_exception", None)
             logger.warning(f"{key} bozo: {be}")
         items: List[Dict] = []
-        cutoff = datetime.now(TZ) - timedelta(days=DAYS_LOOKBACK)
+        cutoff = datetime.now(TZ) - timedelta(days=SPAN_DAYS)
         for e in parsed.entries:
             dt = parse_dt(e) or datetime.now(TZ)
-            if dt < cutoff: continue
+            if dt < cutoff:
+                continue
             title, summary, content = entry_text(e)
             link = getattr(e, "link", "") or ""
             items.append({
@@ -236,7 +255,7 @@ async def fetch_rss_source(client: httpx.AsyncClient, src: Dict) -> Tuple[str, L
         logger.error(f"{key} 抓取失败: {msg}")
         return key, [], msg
 
-# ── API 备源（可选）───────────────────────────────────────────────────────────
+# ── API 备源（可选；限定近 SPAN_DAYS 天）────────────────────────────────────
 def _mk_item(date_dt: datetime, source_key: str, source_name: str, title: str, desc: str, url: str) -> Dict:
     return {
         "date": date_dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M"),
@@ -245,11 +264,18 @@ def _mk_item(date_dt: datetime, source_key: str, source_name: str, title: str, d
         "content": "", "url": (url or "").strip(),
     }
 
+def _api_time_window():
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(days=SPAN_DAYS)
+    # ISO8601
+    return start_dt.isoformat(timespec="seconds").replace("+00:00", "Z"), end_dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+
 async def fetch_newsapi(kws: List[str]) -> Tuple[str, List[Dict], str | None]:
     if not NEWSAPI_KEY: return "newsapi", [], "no_key"
     base = "https://newsapi.org/v2/everything"
     headers = {"X-Api-Key": NEWSAPI_KEY}
     lang_list = (["zh"] if CHINESE_ONLY else ["zh","en"])
+    start_iso, end_iso = _api_time_window()
     all_items: List[Dict] = []
     try:
         async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
@@ -259,9 +285,14 @@ async def fetch_newsapi(kws: List[str]) -> Tuple[str, List[Dict], str | None]:
                     if not b: continue
                     q = " OR ".join(b)
                     for page in range(1, API_MAX_PAGES+1):
-                        params = {"q": q, "language": lang, "pageSize": 100, "page": page, "sortBy": "publishedAt"}
+                        params = {
+                            "q": q, "language": lang, "pageSize": 100, "page": page,
+                            "sortBy": "publishedAt", "from": start_iso, "to": end_iso
+                        }
                         r = await c.get(base, params=params, headers=headers)
-                        if r.status_code != 200: logger.warning(f"newsapi HTTP {r.status_code} q={q[:20]}..."); break
+                        if r.status_code != 200:
+                            logger.warning(f"newsapi HTTP {r.status_code} q={q[:20]}...")
+                            break
                         js = r.json(); arts = js.get("articles") or []
                         if not arts: break
                         for a in arts:
@@ -276,16 +307,26 @@ async def fetch_newsapi(kws: List[str]) -> Tuple[str, List[Dict], str | None]:
 async def fetch_mediastack(kws: List[str]) -> Tuple[str, List[Dict], str | None]:
     if not MEDIASTACK_KEY: return "mediastack", [], "no_key"
     base = "http://api.mediastack.com/v1/news"
+    start_iso, end_iso = _api_time_window()
+    # mediastack 支持 date=YYYY-MM-DD,YYYY-MM-DD
+    date_range = f"{start_iso[:10]},{end_iso[:10]}"
     all_items: List[Dict] = []
     try:
         async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
             batches = [kws[i:i+API_BATCH_KW] for i in range(0, len(kws), API_BATCH_KW)] or [[]]
             for b in batches:
                 if not b: continue
-                params = {"access_key": MEDIASTACK_KEY, "languages": "zh" if CHINESE_ONLY else "zh,en",
-                          "limit": 100, "sort": "published_desc", "keywords": ",".join(b)}
+                params = {
+                    "access_key": MEDIASTACK_KEY,
+                    "languages": "zh" if CHINESE_ONLY else "zh,en",
+                    "limit": 100, "sort": "published_desc",
+                    "keywords": ",".join(b),
+                    "date": date_range,
+                }
                 r = await c.get(base, params=params)
-                if r.status_code != 200: logger.warning(f"mediastack HTTP {r.status_code}"); continue
+                if r.status_code != 200:
+                    logger.warning(f"mediastack HTTP {r.status_code}")
+                    continue
                 js = r.json(); data = js.get("data") or []
                 for a in data:
                     dt_str = a.get("published_at") or ""
@@ -307,7 +348,9 @@ async def fetch_juhe_caijing(kws: List[str]) -> Tuple[str, List[Dict], str | Non
                 if not b: continue
                 params = {"key": JUHE_KEY, "word": " ".join(b)}
                 r = await c.get(base, params=params)
-                if r.status_code != 200: logger.warning(f"juhe HTTP {r.status_code}"); continue
+                if r.status_code != 200:
+                    logger.warning(f"juhe HTTP {r.status_code}")
+                    continue
                 js = r.json(); result = js.get("result") or []
                 for a in result:
                     dt_str = a.get("pubDate") or ""
@@ -325,13 +368,13 @@ async def main():
     # 1) RSS 源
     sources_rss = load_sources()
 
-    # 2) 关键词
+    # 2) 关键词（基础中文 + Qwen 中英混合）
     holds = load_holdings()
     sectors, base_kws = base_keywords_from_holdings(holds)
     logger.info(f"基础关键词 {len(base_kws)} 个；行业：{', '.join(sectors) if sectors else '-'}")
     extra_kws = await qwen_expand_keywords(holds) if holds else []
     final_kws = uniq_keep_order([*base_kws, *extra_kws])
-    OUT_KW.write_text("\n".join(final_kws) or "", encoding="utf-8")
+    OUT_KW.write_text("\n".join(final_kws) if final_kws else "", encoding="utf-8")
     if extra_kws and not OUT_QW.is_file():
         OUT_QW.write_text("\n".join(extra_kws), encoding="utf-8")
 
@@ -353,14 +396,14 @@ async def main():
             else:
                 logger.info(f"{key} 抓到 {len(items)} 条")
 
-    # 4) 可选 API 备源
+    # 4) 可选 API 备源（限定近 SPAN_DAYS 天）
     api_results = await asyncio.gather(
         fetch_newsapi(final_kws),
         fetch_mediastack(final_kws),
         fetch_juhe_caijing(final_kws),
     )
     for key, items, err in api_results:
-        if key == "newsapi" and not NEWSAPI_KEY:      continue
+        if key == "newsapi" and not NEWSAPI_KEY:       continue
         if key == "mediastack" and not MEDIASTACK_KEY: continue
         if key == "juhe_caijing" and not JUHE_KEY:     continue
         all_items.extend(items)
@@ -374,7 +417,7 @@ async def main():
     logger.info(f"收集完成：全量 {len(all_items)} 条（未去重）")
 
     # 5) 关键词命中（标题 + 摘要 + content）
-    hit_items = [it for it in all_items if hit_by_keywords(it["title"], it["summary"], it.get("content",""), final_kws)] if final_kws else all_items[:]
+    hit_items = [it for it in all_items if not final_kws or hit_by_keywords(it["title"], it["summary"], it.get("content",""), final_kws)]
     for it in hit_items:
         per_source_hit[it["source_key"]] = per_source_hit.get(it["source_key"], 0) + 1
     logger.info(f"正文/标题命中后保留 {len(hit_items)} 条（命中≥1 关键词）")
@@ -406,7 +449,7 @@ async def main():
             s["consec_fail"] = 0
             s["last_ok"] = now_iso()
             s["last_error"] = None
-            s["ok"] = True                 # ✅ 只要成功一次就打 true
+            s["ok"] = True                 # 成功一次即 true
         else:
             s["consec_fail"] = int(s.get("consec_fail", 0)) + 1
             s["last_error"] = status
