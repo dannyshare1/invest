@@ -74,7 +74,14 @@ async def push_serverchan(text: str):
     key = os.getenv("SCKEY","").strip()
     if not key: return
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
-        await c.post(f"https://sctapi.ftqq.com/{key}.send", data={"text":"每日提示","desp":text})
+        try:
+            r = await c.post(
+                f"https://sctapi.ftqq.com/{key}.send",
+                data={"text": "每日提示", "desp": text},
+            )
+            r.raise_for_status()
+        except httpx.HTTPError as e:
+            print(f"ServerChan push failed: {e}")
 
 async def push_telegram(text: str):
     tok = os.getenv("TELEGRAM_BOT_TOKEN","").strip()
@@ -83,8 +90,14 @@ async def push_telegram(text: str):
     chunks = [text[i:i+3500] for i in range(0, len(text), 3500)]
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
         for ch in chunks:
-            await c.post(f"https://api.telegram.org/bot{tok}/sendMessage",
-                         data={"chat_id": cid, "text": ch})
+            try:
+                r = await c.post(
+                    f"https://api.telegram.org/bot{tok}/sendMessage",
+                    data={"chat_id": cid, "text": ch},
+                )
+                r.raise_for_status()
+            except httpx.HTTPError as e:
+                print(f"Telegram push failed: {e}")
 
 def build_prompt(holds: List[Dict], briefing: str) -> str:
     secs = ", ".join(infer_sectors(holds)) or "-"
