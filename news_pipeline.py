@@ -124,11 +124,14 @@ def entry_text(entry) -> Tuple[str, str, str]:
     summary = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
     content = ""
     try:
-        if getattr(entry, "content", None):
-            content = (
-                " ".join((c.get("value") or "") for c in entry.content if isinstance(entry.content, list))
-                if isinstance(entry.content, list) else str(entry.content)
-            )
+        cont = getattr(entry, "content", None)
+        if cont:
+            if isinstance(cont, list):
+                content = " ".join((c.get("value") or "") for c in cont if isinstance(c, dict))
+            elif isinstance(cont, dict):
+                content = cont.get("value") or ""
+            else:
+                content = str(cont)
     except Exception:
         content = ""
     return title, summary, content
