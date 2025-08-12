@@ -364,12 +364,19 @@ async def fetch_juhe_caijing(kws: List[str]) -> Tuple[str, List[Dict], str | Non
                 if r.status_code != 200:
                     logger.warning(f"juhe HTTP {r.status_code}")
                     continue
-                js = r.json(); result = js.get("result") or []
-                for a in result:
-                    dt_str = a.get("pubDate") or ""
+                js = r.json(); result = js.get("result")
+                if not isinstance(result, dict):
+                    logger.warning("juhe result not dict")
+                    return "juhe_caijing", all_items, "bad result"
+                newslist = result.get("newslist")
+                if not isinstance(newslist, list):
+                    logger.warning("juhe newslist not list")
+                    return "juhe_caijing", all_items, "bad newslist"
+                for a in newslist:
+                    dt_str = a.get("ctime") or ""
                     try: dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
                     except Exception: dt = datetime.utcnow().replace(tzinfo=timezone.utc)
-                    all_items.append(_mk_item(dt, "juhe_caijing", "聚合数据", a.get("title",""), a.get("digest",""), a.get("url","")))
+                    all_items.append(_mk_item(dt, "juhe_caijing", "聚合数据", a.get("title",""), a.get("description",""), a.get("url","")))
     except Exception as e:
         return "juhe_caijing", [], f"{type(e).__name__}: {e}"
     return ("juhe_caijing", all_items, None if all_items else "0 items")
