@@ -6,5 +6,5 @@
   {"symbol": "515650.SH", "name": "消费50ETF",  "weight": 0.00},
   {"symbol": "512010.SH", "name": "医药ETF",    "weight": 0.01},
   {"symbol": "159985.SH", "name": "豆粕ETF",    "weight": 0.00},
-  {"symbol": "513500", "name": "博时标普500ETF", "weight": 0.01}
+  {"symbol": "513500",    "name": "博时标普500ETF", "weight": 0.01}
 ]
