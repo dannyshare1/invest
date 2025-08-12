@@ -33,3 +33,7 @@ python daily_push_qwen.py    # 生成并推送提示
 - `errors.log`
 
 若需推送或调用额外 API，请设置相关环境变量（如 `QWEN_API_KEY`、`NEWSAPI_KEY`、`MEDIASTACK_KEY`、`JUHE_KEY`、`SCKEY`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`）。
+
+## 依赖管理
+
+`requirements.txt` 中的依赖已固定版本以确保可重复运行，建议定期（例如每月或每季度）检查并更新这些版本，以获得安全补丁和兼容性修复。
