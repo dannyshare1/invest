@@ -3,7 +3,7 @@
   url: https://rsshub.app/cls/telegraph
   keep: false
   consec_fail: 0
-  last_ok: 2025-08-12T10:44:49+0800
+  last_ok: 2025-08-12T11:46:42+0800
   last_error: null
   ok: true
 - key: ft_cn
@@ -11,7 +11,7 @@
   url: https://www.ftchinese.com/rss/news
   keep: false
   consec_fail: 0
-  last_ok: 2025-08-12T10:44:49+0800
+  last_ok: 2025-08-12T11:46:42+0800
   last_error: null
   ok: true
 - key: jiemian
@@ -19,6 +19,6 @@
   url: https://a.jiemian.com/index.php?m=article&a=rss
   keep: false
   consec_fail: 0
-  last_ok: 2025-08-12T10:44:49+0800
+  last_ok: 2025-08-12T11:46:42+0800
   last_error: null
   ok: true
