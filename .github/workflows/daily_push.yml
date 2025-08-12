@@ -31,9 +31,7 @@ jobs:
 
       # 采集器的可调参数（保持原值）
       SPAN_DAYS: 3
-      RSS_WHITELIST:
-      RSS_BLACKLIST:
-      RSS_EXTRA:
+    
 
     steps:
       - name: Checkout
