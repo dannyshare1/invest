@@ -137,8 +137,8 @@ def entry_text(entry) -> Tuple[str, str, str]:
     return title, summary, content
 
 def hit_by_keywords(title: str, summary: str, content: str, kws: List[str]) -> bool:
-    blob = f"{title} {summary} {content or ''}"
-    return any(k in blob for k in kws)
+    blob = f"{title} {summary} {content or ''}".lower()
+    return any(k.lower() in blob for k in kws)
 
 # ── sources.yml 读写（仅 RSS 源）─────────────────────────────────────────────
 def load_sources() -> List[Dict]:
