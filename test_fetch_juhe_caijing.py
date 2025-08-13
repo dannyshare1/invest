@@ -27,6 +27,22 @@ class DummyClient:
         return next(self._responses)
 
 
+class RecordingClient:
+    def __init__(self, response):
+        self._response = response
+        self.params = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
+
+    async def get(self, url, params=None):
+        self.params = params
+        return self._response
+
+
 @pytest.mark.asyncio
 async def test_fetch_juhe_caijing_continues_on_error(monkeypatch, caplog):
     np.JUHE_KEY = "x"
@@ -59,3 +75,16 @@ async def test_fetch_juhe_caijing_logs_non_dict(monkeypatch, caplog):
     assert items == []
     assert err == "0 items"
     assert "juhe non-dict response" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fetch_juhe_caijing_no_keywords(monkeypatch):
+    np.JUHE_KEY = "x"
+    resp = DummyResp({"error_code": 0, "result": {"newslist": []}})
+    client = RecordingClient(resp)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client)
+    src, items, err = await np.fetch_juhe_caijing([])
+    assert src == "juhe_caijing"
+    assert items == []
+    assert err == "0 items"
+    assert client.params == {"key": "x"}
