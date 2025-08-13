@@ -367,8 +367,9 @@ async def fetch_juhe_caijing(kws: List[str]) -> Tuple[str, List[Dict], str | Non
         async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
             batches = [kws[i:i+API_BATCH_KW] for i in range(0, len(kws), API_BATCH_KW)] or [[]]
             for b in batches:
-                if not b: continue
-                params = {"key": JUHE_KEY, "word": " ".join(b)}
+                params = {"key": JUHE_KEY}
+                if b:
+                    params["word"] = " ".join(b)
                 r = await c.get(base, params=params)
                 if r.status_code != 200:
                     logger.warning(f"juhe HTTP {r.status_code}")
