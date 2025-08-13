@@ -364,14 +364,25 @@ async def fetch_juhe_caijing(kws: List[str]) -> Tuple[str, List[Dict], str | Non
                 if r.status_code != 200:
                     logger.warning(f"juhe HTTP {r.status_code}")
                     continue
-                js = r.json(); result = js.get("result")
+                try:
+                    js = r.json()
+                except Exception as e:
+                    logger.warning(f"juhe invalid json: {e}; text={r.text[:200]}")
+                    continue
+                if not isinstance(js, dict):
+                    logger.warning(f"juhe non-dict response: {js!r}")
+                    continue
+                if js.get("error_code") not in (0, None):
+                    logger.warning(f"juhe error response: {js!r}")
+                    continue
+                result = js.get("result")
                 if not isinstance(result, dict):
-                    logger.warning("juhe result not dict")
-                    return "juhe_caijing", all_items, "bad result"
+                    logger.warning(f"juhe result not dict: {js!r}")
+                    continue
                 newslist = result.get("newslist")
                 if not isinstance(newslist, list):
-                    logger.warning("juhe newslist not list")
-                    return "juhe_caijing", all_items, "bad newslist"
+                    logger.warning(f"juhe newslist not list: {js!r}")
+                    continue
                 for a in newslist:
                     dt_str = a.get("ctime") or ""
                     try: dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
