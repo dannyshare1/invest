@@ -362,12 +362,13 @@ async def fetch_mediastack(kws: List[str]) -> Tuple[str, List[Dict], str | None]
 async def fetch_juhe_caijing(kws: List[str]) -> Tuple[str, List[Dict], str | None]:
     if not JUHE_KEY: return "juhe_caijing", [], "no_key"
     base = "http://apis.juhe.cn/fapigx/caijing/query"
+    start_iso, end_iso = _api_time_window()
     all_items: List[Dict] = []
     try:
         async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
             batches = [kws[i:i+API_BATCH_KW] for i in range(0, len(kws), API_BATCH_KW)] or [[]]
             for b in batches:
-                params = {"key": JUHE_KEY}
+                params = {"key": JUHE_KEY, "start": start_iso, "end": end_iso}
                 if b:
                     params["word"] = " ".join(b)
                 r = await c.get(base, params=params)
@@ -393,10 +394,19 @@ async def fetch_juhe_caijing(kws: List[str]) -> Tuple[str, List[Dict], str | Non
                 if not isinstance(newslist, list):
                     logger.warning(f"juhe newslist not list: {js!r}")
                     continue
+                cutoff = datetime.now(timezone.utc) - timedelta(days=SPAN_DAYS)
+                filtered: List[Tuple[datetime, Dict]] = []
                 for a in newslist:
                     dt_str = a.get("ctime") or ""
-                    try: dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
-                    except Exception: dt = datetime.utcnow().replace(tzinfo=timezone.utc)
+                    try:
+                        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                    except Exception:
+                        dt = datetime.utcnow().replace(tzinfo=timezone.utc)
+                    if dt < cutoff:
+                        continue
+                    filtered.append((dt, a))
+                logger.info(f"juhe filtered {len(newslist)} -> {len(filtered)} items")
+                for dt, a in filtered:
                     all_items.append(_mk_item(dt, "juhe_caijing", "聚合数据", a.get("title",""), a.get("description",""), a.get("url","")))
     except Exception as e:
         return "juhe_caijing", [], f"{type(e).__name__}: {e}"
