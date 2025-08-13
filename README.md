@@ -32,7 +32,7 @@ python daily_push_qwen.py    # 生成并推送提示
 - `sources_used.txt`
 - `errors.log`
 
-若需推送或调用额外 API，请设置相关环境变量（如 `QWEN_API_KEY`、`NEWSAPI_KEY`、`MEDIASTACK_KEY`、`JUHE_KEY`、`SCKEY`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`）。
+若需推送或调用额外 API，请设置相关环境变量（如 `QWEN_API_KEY`、`NEWSAPI_KEY`、`MEDIASTACK_KEY`、`SCKEY`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`）。
 
 ## 依赖管理
 

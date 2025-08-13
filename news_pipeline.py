@@ -30,7 +30,6 @@ RSS 源配置（sources.yml）
 - 若设置以下可选 API key，会在 RSS 之后追加抓取（限定近 SPAN_DAYS 天）：
     NEWSAPI_KEY     → NewsAPI everything
     MEDIASTACK_KEY  → mediastack news
-    JUHE_KEY        → 聚合数据财经资讯（fapigx/caijing/query）
 - 关键词：
     1) 从 holdings.json 生成“基础中文”关键词；
     2) 如有 QWEN_API_KEY → 让通义千问生成**中英文**关键词，合并去重。
@@ -66,7 +65,6 @@ OUT_ERR      = Path("errors.log")
 QWEN_API_KEY     = os.getenv("QWEN_API_KEY", "").strip()
 NEWSAPI_KEY      = os.getenv("NEWSAPI_KEY", "").strip()
 MEDIASTACK_KEY   = os.getenv("MEDIASTACK_KEY", "").strip()
-JUHE_KEY         = os.getenv("JUHE_KEY", "").strip()
 CHINESE_ONLY     = os.getenv("CHINESE_ONLY", "0").strip() == "1"  # 默认开放英文
 QWEN_MAX_RETRIES = max(1, int(os.getenv("QWEN_MAX_RETRIES", "3")))
 QWEN_TIMEOUT     = float(os.getenv("QWEN_TIMEOUT", "20"))
@@ -89,8 +87,6 @@ if not NEWSAPI_KEY:
     logger.warning("NEWSAPI_KEY not set; skipping newsapi fetch")
 if not MEDIASTACK_KEY:
     logger.warning("MEDIASTACK_KEY not set; skipping mediastack fetch")
-if not JUHE_KEY:
-    logger.warning("JUHE_KEY not set; skipping juhe_caijing fetch")
 
 def now_iso() -> str:
     return datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -380,59 +376,6 @@ async def fetch_mediastack(kws: List[str]) -> Tuple[str, List[Dict], str | None]
         return "mediastack", [], f"{type(e).__name__}: {e}"
     return ("mediastack", all_items, None if all_items else "0 items")
 
-async def fetch_juhe_caijing(kws: List[str]) -> Tuple[str, List[Dict], str | None]:
-    if not JUHE_KEY: return "juhe_caijing", [], "no_key"
-    base = "http://apis.juhe.cn/fapigx/caijing/query"
-    start_iso, end_iso = _api_time_window()
-    all_items: List[Dict] = []
-    try:
-        async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
-            batches = [kws[i:i+API_BATCH_KW] for i in range(0, len(kws), API_BATCH_KW)] or [[]]
-            for b in batches:
-                params = {"key": JUHE_KEY, "start": start_iso, "end": end_iso}
-                if b:
-                    params["word"] = " ".join(b)
-                r = await c.get(base, params=params)
-                if r.status_code != 200:
-                    logger.warning(f"juhe HTTP {r.status_code}")
-                    continue
-                try:
-                    js = r.json()
-                except Exception as e:
-                    logger.warning(f"juhe invalid json: {e}; text={r.text[:200]}")
-                    continue
-                if not isinstance(js, dict):
-                    logger.warning(f"juhe non-dict response: {js!r}")
-                    continue
-                if js.get("error_code") not in (0, None):
-                    logger.warning(f"juhe error response: {js!r}")
-                    continue
-                result = js.get("result")
-                if not isinstance(result, dict):
-                    logger.warning(f"juhe result not dict: {js!r}")
-                    continue
-                newslist = result.get("newslist")
-                if not isinstance(newslist, list):
-                    logger.warning(f"juhe newslist not list: {js!r}")
-                    continue
-                cutoff = datetime.now(timezone.utc) - timedelta(days=SPAN_DAYS)
-                filtered: List[Tuple[datetime, Dict]] = []
-                for a in newslist:
-                    dt_str = a.get("ctime") or ""
-                    try:
-                        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-                    except Exception:
-                        dt = datetime.utcnow().replace(tzinfo=timezone.utc)
-                    if dt < cutoff:
-                        continue
-                    filtered.append((dt, a))
-                logger.info(f"juhe filtered {len(newslist)} -> {len(filtered)} items")
-                for dt, a in filtered:
-                    all_items.append(_mk_item(dt, "juhe_caijing", "聚合数据", a.get("title",""), a.get("description",""), a.get("url","")))
-    except Exception as e:
-        return "juhe_caijing", [], f"{type(e).__name__}: {e}"
-    return ("juhe_caijing", all_items, None if all_items else "0 items")
-
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 async def main():
     logger.info("开始收集（RSS + 可选 API 备源）")
@@ -483,12 +426,10 @@ async def main():
     api_results = await asyncio.gather(
         fetch_newsapi(final_kws),
         fetch_mediastack(final_kws),
-        fetch_juhe_caijing(final_kws),
     )
     for key, items, err in api_results:
         if key == "newsapi" and not NEWSAPI_KEY:       continue
         if key == "mediastack" and not MEDIASTACK_KEY: continue
-        if key == "juhe_caijing" and not JUHE_KEY:     continue
         all_items.extend(items)
         per_source_all[key] = per_source_all.get(key, 0) + len(items)
         last_status[key] = ("OK" if (err is None and len(items) > 0) else (err or "0 items"))
