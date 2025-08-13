@@ -68,6 +68,8 @@ NEWSAPI_KEY      = os.getenv("NEWSAPI_KEY", "").strip()
 MEDIASTACK_KEY   = os.getenv("MEDIASTACK_KEY", "").strip()
 JUHE_KEY         = os.getenv("JUHE_KEY", "").strip()
 CHINESE_ONLY     = os.getenv("CHINESE_ONLY", "0").strip() == "1"  # 默认开放英文
+QWEN_MAX_RETRIES = max(1, int(os.getenv("QWEN_MAX_RETRIES", "3")))
+QWEN_TIMEOUT     = float(os.getenv("QWEN_TIMEOUT", "20"))
 
 # API 分页/批次
 API_MAX_PAGES    = max(1, int(os.getenv("API_MAX_PAGES", "2")))
@@ -210,9 +212,15 @@ def base_keywords_from_holdings(holds: List[dict]) -> Tuple[List[str], List[str]
     words = [w for w in words if is_chinese_word(w) and 2 <= len(w) <= 6]
     return sorted(sectors), uniq_keep_order(words)
 
-async def qwen_expand_keywords(holds: List[dict]) -> List[str]:
+async def qwen_expand_keywords(
+    holds: List[dict],
+    max_retries: int | None = None,
+    timeout: float | httpx.Timeout | None = None,
+) -> List[str]:
     if not QWEN_API_KEY:
         return []
+    max_retries = max(1, max_retries if max_retries is not None else QWEN_MAX_RETRIES)
+    timeout = timeout if timeout is not None else QWEN_TIMEOUT
     prompt = (
         "根据以下 ETF 持仓名称或行业，生成 80-160 个关键词，每个关键词需同时给出中文和对应英文，"
         "格式如“半导体/semiconductor”，以 2~4 个字/词为主，使用中文或英文逗号分隔这些中英词对，"
@@ -223,13 +231,18 @@ async def qwen_expand_keywords(holds: List[dict]) -> List[str]:
     API = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     hdr = {"Content-Type":"application/json","Authorization":f"Bearer {QWEN_API_KEY}"}
     pl  = {"model":"qwen-plus","input":{"prompt":prompt},"parameters":{"max_tokens":800,"temperature":0.7}}
-    try:
-        async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
-            r = await c.post(API, headers=hdr, json=pl); r.raise_for_status()
-            text = r.json()["output"]["text"].strip()
-    except Exception as e:
-        logger.error(f"Qwen 调用失败: {type(e).__name__}: {e}")
-        return []
+    async with httpx.AsyncClient(timeout=timeout) as c:
+        for attempt in range(max_retries):
+            try:
+                r = await c.post(API, headers=hdr, json=pl)
+                r.raise_for_status()
+                text = r.json()["output"]["text"].strip()
+                break
+            except Exception as e:
+                if attempt + 1 == max_retries:
+                    logger.error(f"Qwen 调用失败: {type(e).__name__}: {e}")
+                    return []
+                await asyncio.sleep(1)
     raw = re.split(r"[，,;\n]+", text)
     kws: List[str] = []
     for w in raw:
