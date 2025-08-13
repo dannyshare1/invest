@@ -214,8 +214,9 @@ async def qwen_expand_keywords(holds: List[dict]) -> List[str]:
     if not QWEN_API_KEY:
         return []
     prompt = (
-        "根据以下 ETF 持仓名称或行业，生成 80-160 个**中英文**关键词（混合输出），"
-        "以 2~4 个字/词为主，使用中文或英文逗号分隔；聚焦行业/主题/政策/产品/热点：\n"
+        "根据以下 ETF 持仓名称或行业，生成 80-160 个关键词，每个关键词需同时给出中文和对应英文，"
+        "格式如“半导体/semiconductor”，以 2~4 个字/词为主，使用中文或英文逗号分隔这些中英词对，"
+        "聚焦行业/主题/政策/产品/热点：\n"
         + "\n".join(f"- {h.get('name','')} {h.get('symbol','')}" for h in holds)
         + "\n只输出关键词，逗号分隔，不要任何解释。"
     )
@@ -230,7 +231,15 @@ async def qwen_expand_keywords(holds: List[dict]) -> List[str]:
         logger.error(f"Qwen 调用失败: {type(e).__name__}: {e}")
         return []
     raw = re.split(r"[，,;\n]+", text)
-    kws = [w.strip() for w in raw if is_keyword(w.strip())]
+    kws: List[str] = []
+    for w in raw:
+        w = w.strip()
+        if not w:
+            continue
+        parts = [p.strip() for p in w.split("/") if p.strip()]
+        for p in parts:
+            if is_keyword(p):
+                kws.append(p)
     kws = uniq_keep_order(kws)
     OUT_QW.write_text("\n".join(kws) if kws else "", encoding="utf-8")
     return kws
@@ -405,6 +414,17 @@ async def main():
     logger.info(f"基础关键词 {len(base_kws)} 个；行业：{', '.join(sectors) if sectors else '-'}")
     extra_kws = await qwen_expand_keywords(holds) if holds else []
     final_kws = uniq_keep_order([*base_kws, *extra_kws])
+    if not CHINESE_ONLY:
+        seen_en = set()
+        merged: List[str] = []
+        for k in final_kws:
+            if is_english_word(k):
+                lk = k.lower()
+                if lk in seen_en:
+                    continue
+                seen_en.add(lk)
+            merged.append(k)
+        final_kws = merged
     OUT_KW.write_text("\n".join(final_kws) if final_kws else "", encoding="utf-8")
     if extra_kws and not OUT_QW.is_file():
         OUT_QW.write_text("\n".join(extra_kws), encoding="utf-8")
