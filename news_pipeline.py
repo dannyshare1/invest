@@ -84,6 +84,14 @@ logger.handlers.clear(); logger.addHandler(sh)
 fh = logging.FileHandler(OUT_ERR, mode="w", encoding="utf-8")
 fh.setLevel(logging.WARNING); fh.setFormatter(_fmt); logger.addHandler(fh)
 
+# Warn once on missing optional API keys to aid debugging
+if not NEWSAPI_KEY:
+    logger.warning("NEWSAPI_KEY not set; skipping newsapi fetch")
+if not MEDIASTACK_KEY:
+    logger.warning("MEDIASTACK_KEY not set; skipping mediastack fetch")
+if not JUHE_KEY:
+    logger.warning("JUHE_KEY not set; skipping juhe_caijing fetch")
+
 def now_iso() -> str:
     return datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
 
