@@ -1,5 +1,7 @@
 import logging
 import json
+from datetime import datetime, timezone
+
 import pytest
 import httpx
 import news_pipeline as np
@@ -47,9 +49,10 @@ class RecordingClient:
 async def test_fetch_juhe_caijing_continues_on_error(monkeypatch, caplog):
     np.JUHE_KEY = "x"
     monkeypatch.setattr(np, "API_BATCH_KW", 1)
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     good = {
         "error_code": 0,
-        "result": {"newslist": [{"ctime": "2024-01-01T00:00:00Z", "title": "t", "description": "d", "url": "u"}]},
+        "result": {"newslist": [{"ctime": now_iso, "title": "t", "description": "d", "url": "u"}]},
     }
     responses = [
         DummyResp({"error_code": 123, "reason": "bad"}),
@@ -83,8 +86,9 @@ async def test_fetch_juhe_caijing_no_keywords(monkeypatch):
     resp = DummyResp({"error_code": 0, "result": {"newslist": []}})
     client = RecordingClient(resp)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client)
+    monkeypatch.setattr(np, "_api_time_window", lambda: ("start", "end"))
     src, items, err = await np.fetch_juhe_caijing([])
     assert src == "juhe_caijing"
     assert items == []
     assert err == "0 items"
-    assert client.params == {"key": "x"}
+    assert client.params == {"key": "x", "start": "start", "end": "end"}
