@@ -3,14 +3,14 @@ name: Collector and Push
 on:
   workflow_dispatch:
   schedule:
-    # 北京时间 09:00 → UTC 01:00
-    - cron: '0 1 * * 1-5'
-    # 北京时间 12:00 → UTC 04:00
-    - cron: '0 4 * * 1-5'
-    # 北京时间 14:30 → UTC 06:30
-    - cron: '30 6 * * 1-5'
-    # 北京时间 16:00 → UTC 08:00
-    - cron: '0 8 * * 1-5'
+    # 北京时间 08:00 → UTC 00:00
+    - cron: '0 0 * * 1-5'
+    # 北京时间 11:00 → UTC 03:00
+    - cron: '0 3 * * 1-5'
+    # 北京时间 13:30 → UTC 05:30
+    - cron: '30 5 * * 1-5'
+    # 北京时间 15:00 → UTC 07:00
+    - cron: '0 7 * * 1-5'
 
 permissions:
   contents: write  # 允许把 sources.yml 的 ok/失败计数回写
@@ -31,7 +31,7 @@ jobs:
 
       # 采集器的可调参数（保持原值）
       SPAN_DAYS: 3
-    
+
 
     steps:
       - name: Checkout
@@ -52,8 +52,12 @@ jobs:
           echo "holdings.json content (masked weights):"
           python - << 'PY'
           import json, pathlib
-          p=pathlib.Path('holdings.json')
-          print(p.read_text('utf-8') if p.is_file() else 'holdings.json not found')
+          p = pathlib.Path('holdings.json')
+          if p.is_file():
+            msg = p.read_text('utf-8')
+          else:
+            msg = 'holdings.json not found'
+          print(msg)
           PY
 
       - name: Run collector (news_pipeline.py)
@@ -92,6 +96,6 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add sources.yml
-            git commit -m "chore: auto-update sources.yml (ok flags / fail counters)"
+            git commit -m "chore: auto-update sources.yml"
             git push
           fi
