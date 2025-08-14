@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py — RSS 收集 + 关键词过滤（中英文）+ 源健康自动维护 + API 备源
+news_pipeline.py — RSS 收集 + 源健康自动维护 + API 备源（暂不使用关键词筛选）
 
 输出文件
 --------
-- briefing.txt           # 仅“命中关键词”的简报（每行：日期  来源 | 标题）
+- briefing.txt           # 简报（每行：日期  来源 | 标题）
 - news_all.csv           # 抓到的全部新闻（未去重），UTF-8 with BOM，便于 Excel
-- keywords_used.txt      # 最终关键词（基础中文词 + Qwen 扩展去重）
-- qwen_keywords.txt      # Qwen 扩展的关键词（中英混合；若失败则为空）
+- keywords_used.txt      # 最终关键词（当前为空）
+- qwen_keywords.txt      # Qwen 扩展的关键词（当前为空）
 - sources_used.txt       # 每个源抓取条数（all/hit/status），RSS 源会参与健康状态回写
 - errors.log             # 详细错误日志（HTTP/解析/0条等）
 
@@ -30,9 +30,7 @@ RSS 源配置（sources.yml）
 - 若设置以下可选 API key，会在 RSS 之后追加抓取（限定近 SPAN_DAYS 天）：
     NEWSAPI_KEY     → NewsAPI everything
     MEDIASTACK_KEY  → mediastack news
-- 关键词：
-    1) 从 holdings.json 生成“基础中文”关键词；
-    2) 如有 QWEN_API_KEY → 让通义千问生成**中英文**关键词，合并去重。
+- 暂未启用关键词筛选
 """
 from __future__ import annotations
 import asyncio, csv, json, logging, os, re
@@ -44,7 +42,7 @@ import feedparser, httpx, yaml
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
 TZ = timezone(timedelta(hours=8))
-SPAN_DAYS    = max(1, int(os.getenv("SPAN_DAYS", "7")))  # 近一周
+SPAN_DAYS    = max(1, int(os.getenv("SPAN_DAYS", "1")))  # 近24小时
 REQ_TIMEOUT  = httpx.Timeout(20.0, read=30.0)
 HEADERS      = {
     "User-Agent": "Mozilla/5.0 (RSSCollector; +https://github.com/)",
@@ -318,19 +316,16 @@ async def fetch_newsapi(kws: List[str]) -> Tuple[str, List[Dict], str | None]:
     all_items: List[Dict] = []
     try:
         async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
-            batches = [kws[i:i+API_BATCH_KW] for i in range(0, len(kws), API_BATCH_KW)] or [[]]
-            for lang in lang_list:
-                for b in batches:
-                    if not b: continue
-                    q = " OR ".join(b)
+            if not kws:
+                for lang in lang_list:
                     for page in range(1, API_MAX_PAGES+1):
                         params = {
-                            "q": q, "language": lang, "pageSize": 100, "page": page,
-                            "sortBy": "publishedAt", "from": start_iso, "to": end_iso
+                            "q": "*", "language": lang, "pageSize": 100, "page": page,
+                            "sortBy": "publishedAt", "from": start_iso, "to": end_iso,
                         }
                         r = await c.get(base, params=params, headers=headers)
                         if r.status_code != 200:
-                            logger.warning(f"newsapi HTTP {r.status_code} q={q[:20]}...")
+                            logger.warning(f"newsapi HTTP {r.status_code}")
                             break
                         js = r.json(); arts = js.get("articles") or []
                         if not arts: break
@@ -339,6 +334,28 @@ async def fetch_newsapi(kws: List[str]) -> Tuple[str, List[Dict], str | None]:
                             try: dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
                             except Exception: dt = datetime.utcnow().replace(tzinfo=timezone.utc)
                             all_items.append(_mk_item(dt, "newsapi", "NewsAPI", a.get("title",""), a.get("description",""), a.get("url","")))
+            else:
+                batches = [kws[i:i+API_BATCH_KW] for i in range(0, len(kws), API_BATCH_KW)] or [[]]
+                for lang in lang_list:
+                    for b in batches:
+                        if not b: continue
+                        q = " OR ".join(b)
+                        for page in range(1, API_MAX_PAGES+1):
+                            params = {
+                                "q": q, "language": lang, "pageSize": 100, "page": page,
+                                "sortBy": "publishedAt", "from": start_iso, "to": end_iso
+                            }
+                            r = await c.get(base, params=params, headers=headers)
+                            if r.status_code != 200:
+                                logger.warning(f"newsapi HTTP {r.status_code} q={q[:20]}...")
+                                break
+                            js = r.json(); arts = js.get("articles") or []
+                            if not arts: break
+                            for a in arts:
+                                dt_str = a.get("publishedAt") or ""
+                                try: dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
+                                except Exception: dt = datetime.utcnow().replace(tzinfo=timezone.utc)
+                                all_items.append(_mk_item(dt, "newsapi", "NewsAPI", a.get("title",""), a.get("description",""), a.get("url","")))
     except Exception as e:
         return "newsapi", [], f"{type(e).__name__}: {e}"
     return ("newsapi", all_items, None if all_items else "0 items")
@@ -352,26 +369,44 @@ async def fetch_mediastack(kws: List[str]) -> Tuple[str, List[Dict], str | None]
     all_items: List[Dict] = []
     try:
         async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
-            batches = [kws[i:i+API_BATCH_KW] for i in range(0, len(kws), API_BATCH_KW)] or [[]]
-            for b in batches:
-                if not b: continue
+            if not kws:
                 params = {
                     "access_key": MEDIASTACK_KEY,
                     "languages": "zh" if CHINESE_ONLY else "zh,en",
                     "limit": 100, "sort": "published_desc",
-                    "keywords": ",".join(b),
                     "date": date_range,
                 }
                 r = await c.get(base, params=params)
                 if r.status_code != 200:
                     logger.warning(f"mediastack HTTP {r.status_code}")
-                    continue
-                js = r.json(); data = js.get("data") or []
-                for a in data:
-                    dt_str = a.get("published_at") or ""
-                    try: dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
-                    except Exception: dt = datetime.utcnow().replace(tzinfo=timezone.utc)
-                    all_items.append(_mk_item(dt, "mediastack", "mediastack", a.get("title",""), a.get("description",""), a.get("url","")))
+                else:
+                    js = r.json(); data = js.get("data") or []
+                    for a in data:
+                        dt_str = a.get("published_at") or ""
+                        try: dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
+                        except Exception: dt = datetime.utcnow().replace(tzinfo=timezone.utc)
+                        all_items.append(_mk_item(dt, "mediastack", "mediastack", a.get("title",""), a.get("description",""), a.get("url","")))
+            else:
+                batches = [kws[i:i+API_BATCH_KW] for i in range(0, len(kws), API_BATCH_KW)] or [[]]
+                for b in batches:
+                    if not b: continue
+                    params = {
+                        "access_key": MEDIASTACK_KEY,
+                        "languages": "zh" if CHINESE_ONLY else "zh,en",
+                        "limit": 100, "sort": "published_desc",
+                        "keywords": ",".join(b),
+                        "date": date_range,
+                    }
+                    r = await c.get(base, params=params)
+                    if r.status_code != 200:
+                        logger.warning(f"mediastack HTTP {r.status_code}")
+                        continue
+                    js = r.json(); data = js.get("data") or []
+                    for a in data:
+                        dt_str = a.get("published_at") or ""
+                        try: dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
+                        except Exception: dt = datetime.utcnow().replace(tzinfo=timezone.utc)
+                        all_items.append(_mk_item(dt, "mediastack", "mediastack", a.get("title",""), a.get("description",""), a.get("url","")))
     except Exception as e:
         return "mediastack", [], f"{type(e).__name__}: {e}"
     return ("mediastack", all_items, None if all_items else "0 items")
@@ -383,26 +418,10 @@ async def main():
     # 1) RSS 源
     sources_rss = load_sources()
 
-    # 2) 关键词（基础中文 + Qwen 中英混合）
-    holds = load_holdings()
-    sectors, base_kws = base_keywords_from_holdings(holds)
-    logger.info(f"基础关键词 {len(base_kws)} 个；行业：{', '.join(sectors) if sectors else '-'}")
-    extra_kws = await qwen_expand_keywords(holds) if holds else []
-    final_kws = uniq_keep_order([*base_kws, *extra_kws])
-    if not CHINESE_ONLY:
-        seen_en = set()
-        merged: List[str] = []
-        for k in final_kws:
-            if is_english_word(k):
-                lk = k.lower()
-                if lk in seen_en:
-                    continue
-                seen_en.add(lk)
-            merged.append(k)
-        final_kws = merged
-    OUT_KW.write_text("\n".join(final_kws) if final_kws else "", encoding="utf-8")
-    if extra_kws and not OUT_QW.is_file():
-        OUT_QW.write_text("\n".join(extra_kws), encoding="utf-8")
+    # 2) 暂无关键词筛选
+    final_kws: List[str] = []
+    OUT_KW.write_text("", encoding="utf-8")
+    OUT_QW.write_text("", encoding="utf-8")
 
     # 3) 并发抓取 RSS
     all_items: List[Dict] = []
@@ -440,11 +459,11 @@ async def main():
 
     logger.info(f"收集完成：全量 {len(all_items)} 条（未去重）")
 
-    # 5) 关键词命中（标题 + 摘要 + content）
-    hit_items = [it for it in all_items if not final_kws or hit_by_keywords(it["title"], it["summary"], it.get("content",""), final_kws)]
+    # 5) 无关键词筛选，全部保留
+    hit_items = all_items
     for it in hit_items:
         per_source_hit[it["source_key"]] = per_source_hit.get(it["source_key"], 0) + 1
-    logger.info(f"正文/标题命中后保留 {len(hit_items)} 条（命中≥1 关键词）")
+    logger.info(f"无关键词筛选，保留 {len(hit_items)} 条")
 
     # 6) 输出文件
     with OUT_ALL.open("w", newline="", encoding="utf-8-sig") as f:
