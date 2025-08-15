@@ -24,7 +24,7 @@ TZ = timezone(timedelta(hours=8))
 REQ_TIMEOUT = httpx.Timeout(20.0, read=30.0)
 
 QWEN_API = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-QWEN_MODEL = "qwen-plus"
+QWEN_MODEL = "qwen-plus-latest"
 
 def now_date():
     return datetime.now(TZ).strftime("%Y-%m-%d")
