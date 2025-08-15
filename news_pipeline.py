@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py — RSS 收集 + 源健康自动维护 + API 备源（暂不使用关键词筛选）
+news_pipeline.py — RSS 收集 + 源健康自动维护 + API 备源（仅 NewsAPI 使用关键词筛选）
 
 输出文件
 --------
-- briefing.txt           # 简报（每行：日期  来源 | 标题）
+- briefing.txt           # 简报（每行：日期  来源 | 标题 | 摘要）
 - news_all.csv           # 抓到的全部新闻（未去重），UTF-8 with BOM，便于 Excel
-- keywords_used.txt      # 最终关键词（当前为空）
-- qwen_keywords.txt      # Qwen 扩展的关键词（当前为空）
+- keywords_used.txt      # 最终关键词
+- qwen_keywords.txt      # Qwen 扩展的关键词
 - sources_used.txt       # 每个源抓取条数（all/hit/status），RSS 源会参与健康状态回写
 - errors.log             # 详细错误日志（HTTP/解析/0条等）
 
@@ -30,7 +30,7 @@ RSS 源配置（sources.yml）
 - 若设置以下可选 API key，会在 RSS 之后追加抓取（限定近 SPAN_DAYS 天）：
     NEWSAPI_KEY     → NewsAPI everything
     MEDIASTACK_KEY  → mediastack news
-- 暂未启用关键词筛选
+- 仅 NewsAPI 使用关键词筛选
 """
 from __future__ import annotations
 import asyncio, csv, json, logging, os, re
@@ -418,10 +418,25 @@ async def main():
     # 1) RSS 源
     sources_rss = load_sources()
 
-    # 2) 暂无关键词筛选
-    final_kws: List[str] = []
-    OUT_KW.write_text("", encoding="utf-8")
-    OUT_QW.write_text("", encoding="utf-8")
+    # 2) 关键词（基础中文 + Qwen 中英混合）
+    holds = load_holdings()
+    sectors, base_kws = base_keywords_from_holdings(holds)
+    logger.info(f"基础关键词 {len(base_kws)} 个；行业：{', '.join(sectors) if sectors else '-'}")
+    extra_kws = await qwen_expand_keywords(holds) if holds else []
+    final_kws = uniq_keep_order([*base_kws, *extra_kws])
+    if not CHINESE_ONLY:
+        seen_en = set()
+        merged: List[str] = []
+        for k in final_kws:
+            if is_english_word(k):
+                lk = k.lower()
+                if lk in seen_en:
+                    continue
+                seen_en.add(lk)
+            merged.append(k)
+        final_kws = merged
+    OUT_KW.write_text("\n".join(final_kws) if final_kws else "", encoding="utf-8")
+    OUT_QW.write_text("\n".join(extra_kws) if extra_kws else "", encoding="utf-8")
 
     # 3) 并发抓取 RSS
     all_items: List[Dict] = []
@@ -444,7 +459,7 @@ async def main():
     # 4) 可选 API 备源（限定近 SPAN_DAYS 天）
     api_results = await asyncio.gather(
         fetch_newsapi(final_kws),
-        fetch_mediastack(final_kws),
+        fetch_mediastack([]),
     )
     for key, items, err in api_results:
         if key == "newsapi" and not NEWSAPI_KEY:       continue
@@ -459,11 +474,17 @@ async def main():
 
     logger.info(f"收集完成：全量 {len(all_items)} 条（未去重）")
 
-    # 5) 无关键词筛选，全部保留
-    hit_items = all_items
-    for it in hit_items:
-        per_source_hit[it["source_key"]] = per_source_hit.get(it["source_key"], 0) + 1
-    logger.info(f"无关键词筛选，保留 {len(hit_items)} 条")
+    # 5) 仅对 NewsAPI 做关键词筛选
+    hit_items: List[Dict] = []
+    for it in all_items:
+        if it["source_key"] == "newsapi" and final_kws:
+            if hit_by_keywords(it["title"], it["summary"], it.get("content", ""), final_kws):
+                hit_items.append(it)
+                per_source_hit[it["source_key"]] = per_source_hit.get(it["source_key"], 0) + 1
+        else:
+            hit_items.append(it)
+            per_source_hit[it["source_key"]] = per_source_hit.get(it["source_key"], 0) + 1
+    logger.info(f"仅对 NewsAPI 做关键词筛选后保留 {len(hit_items)} 条")
 
     # 6) 输出文件
     with OUT_ALL.open("w", newline="", encoding="utf-8-sig") as f:
@@ -473,7 +494,7 @@ async def main():
             w.writerow([it["date"], it["source_key"], it["source_name"], it["title"], it["summary"], it["url"]])
 
     OUT_BRI.write_text("\n".join(
-        f"{it['date']}  {it['source_name']} | {it['title']}" for it in hit_items
+        f"{it['date']}  {it['source_name']} | {it['title']} | {it['summary']}" for it in hit_items
     ), encoding="utf-8")
 
     with OUT_SRC_USED.open("w", encoding="utf-8") as f:
