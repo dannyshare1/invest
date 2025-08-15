@@ -25,6 +25,7 @@ jobs:
       QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
       JUHE_KEY: ${{ secrets.JUHE_KEY }}
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+      MEDIASTACK_KEY: ${{ secrets.MEDIASTACK_KEY }}
       SCKEY: ${{ secrets.SCKEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
