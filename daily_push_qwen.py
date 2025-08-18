@@ -23,32 +23,46 @@ from bs4 import BeautifulSoup
 
 
 def markdown_to_html(md: str) -> str:
-    """Convert Markdown text to HTML, keeping tables."""
+    """Convert Markdown text to HTML with basic extensions."""
     try:
         import markdown
     except Exception:
         return md
-    return markdown.markdown(md, extensions=["tables"])
+    return markdown.markdown(
+        md, extensions=["tables", "fenced_code", "sane_lists"]
+    )
 
 
 def markdown_to_text(md: str) -> str:
-    """Convert Markdown text to plain text and expand tables as bullet lists."""
+    """Convert Markdown to plain text for Telegram."""
     html = markdown_to_html(md)
     soup = BeautifulSoup(html, "html.parser")
+
+    # Preserve code blocks
+    for pre in soup.find_all("pre"):
+        pre.replace_with("\n```\n" + pre.get_text() + "\n```\n")
+
+    # Tables → bullet lists
     for tbl in soup.find_all("table"):
-        headers = [th.get_text(strip=True) for th in tbl.find_all("th")]
+        headers = [th.get_text(" ", strip=True) for th in tbl.select("tr th")]
         lines: List[str] = []
-        for row in tbl.find_all("tr"):
-            cells = [td.get_text(strip=True) for td in row.find_all("td")]
+        for tr in tbl.select("tr"):
+            cells = [td.get_text(" ", strip=True) for td in tr.select("td")]
             if not cells:
                 continue
-            if headers and len(headers) == len(cells):
-                parts = [f"{h}: {c}" for h, c in zip(headers, cells)]
-            else:
-                parts = cells
+            parts = (
+                [f"{h}: {c}" for h, c in zip(headers, cells)]
+                if headers and len(headers) == len(cells) else cells
+            )
             lines.append("- " + "; ".join(parts))
-        tbl.replace_with("\n".join(lines))
-    return soup.get_text("\n", strip=True)
+        tbl.replace_with("\n".join(lines) + "\n")
+
+    # Links → text (URL)
+    for a in soup.find_all("a"):
+        a.replace_with(f"{a.get_text(strip=True)} ({a.get('href')})")
+
+    text = soup.get_text("\n", strip=True)
+    return re.sub(r"\n{3,}", "\n\n", text)
 
 TZ = timezone(timedelta(hours=8))
 timeout = float(os.getenv("QWEN_TIMEOUT", "30"))
