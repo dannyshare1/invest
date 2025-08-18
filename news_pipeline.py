@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py — RSS 收集 + 源健康自动维护 + API 备源（仅 NewsAPI 使用关键词筛选）
+news_pipeline.py — RSS 收集 + 源健康自动维护 + API 备源（NewsAPI 与 mediastack 使用关键词筛选）
 
 输出文件
 --------
@@ -30,7 +30,7 @@ RSS 源配置（sources.yml）
 - 若设置以下可选 API key，会在 RSS 之后追加抓取（限定近 SPAN_DAYS 天）：
     NEWSAPI_KEY     → NewsAPI everything
     MEDIASTACK_KEY  → mediastack news
-- 仅 NewsAPI 使用关键词筛选
+- NewsAPI 和 mediastack 使用关键词筛选
 """
 from __future__ import annotations
 import asyncio, csv, json, logging, os, re
@@ -459,7 +459,7 @@ async def main():
     # 4) 可选 API 备源（限定近 SPAN_DAYS 天）
     api_results = await asyncio.gather(
         fetch_newsapi(final_kws),
-        fetch_mediastack([]),
+        fetch_mediastack(final_kws),
     )
     for key, items, err in api_results:
         if key == "newsapi" and not NEWSAPI_KEY:       continue
@@ -474,17 +474,18 @@ async def main():
 
     logger.info(f"收集完成：全量 {len(all_items)} 条（未去重）")
 
-    # 5) 仅对 NewsAPI 做关键词筛选
+    # 5) 对 NewsAPI 和 mediastack 做关键词筛选
     hit_items: List[Dict] = []
+    api_sources = {"newsapi", "mediastack"}
     for it in all_items:
-        if it["source_key"] == "newsapi" and final_kws:
+        if it["source_key"] in api_sources and final_kws:
             if hit_by_keywords(it["title"], it["summary"], it.get("content", ""), final_kws):
                 hit_items.append(it)
                 per_source_hit[it["source_key"]] = per_source_hit.get(it["source_key"], 0) + 1
         else:
             hit_items.append(it)
             per_source_hit[it["source_key"]] = per_source_hit.get(it["source_key"], 0) + 1
-    logger.info(f"仅对 NewsAPI 做关键词筛选后保留 {len(hit_items)} 条")
+    logger.info(f"对 NewsAPI 和 mediastack 做关键词筛选后保留 {len(hit_items)} 条")
 
     # 6) 输出文件
     with OUT_ALL.open("w", newline="", encoding="utf-8-sig") as f:

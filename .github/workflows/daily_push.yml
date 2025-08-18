@@ -80,7 +80,6 @@ jobs:
           if-no-files-found: ignore
           path: |
             briefing.txt
-            news_all.csv
             keywords_used.txt
             qwen_keywords.txt
             sources_used.txt
