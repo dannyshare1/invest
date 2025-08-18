@@ -19,6 +19,36 @@ from pathlib import Path
 from typing import List, Dict
 import httpx
 from datetime import datetime, timezone, timedelta
+from bs4 import BeautifulSoup
+
+
+def markdown_to_html(md: str) -> str:
+    """Convert Markdown text to HTML, keeping tables."""
+    try:
+        import markdown
+    except Exception:
+        return md
+    return markdown.markdown(md, extensions=["tables"])
+
+
+def markdown_to_text(md: str) -> str:
+    """Convert Markdown text to plain text and expand tables as bullet lists."""
+    html = markdown_to_html(md)
+    soup = BeautifulSoup(html, "html.parser")
+    for tbl in soup.find_all("table"):
+        headers = [th.get_text(strip=True) for th in tbl.find_all("th")]
+        lines: List[str] = []
+        for row in tbl.find_all("tr"):
+            cells = [td.get_text(strip=True) for td in row.find_all("td")]
+            if not cells:
+                continue
+            if headers and len(headers) == len(cells):
+                parts = [f"{h}: {c}" for h, c in zip(headers, cells)]
+            else:
+                parts = cells
+            lines.append("- " + "; ".join(parts))
+        tbl.replace_with("\n".join(lines))
+    return soup.get_text("\n", strip=True)
 
 TZ = timezone(timedelta(hours=8))
 timeout = float(os.getenv("QWEN_TIMEOUT", "30"))
@@ -81,24 +111,28 @@ async def call_qwen(prompt: str) -> str:
                 print(f"Qwen request error (attempt {attempt+1}/3): {e}; retrying in {delay}s")
                 await asyncio.sleep(delay)
 
-async def push_serverchan(text: str):
+async def push_serverchan(md_text: str):
     key = os.getenv("SCKEY","").strip()
-    if not key: return
+    if not key:
+        return
+    html = markdown_to_html(md_text)
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
         try:
             r = await c.post(
                 f"https://sctapi.ftqq.com/{key}.send",
-                data={"text": "每日提示", "desp": text},
+                data={"text": "每日提示", "desp": html},
             )
             r.raise_for_status()
         except httpx.HTTPError as e:
             print(f"ServerChan push failed: {e}")
 
-async def push_telegram(text: str):
+async def push_telegram(md_text: str):
     tok = os.getenv("TELEGRAM_BOT_TOKEN","").strip()
     cid = os.getenv("TELEGRAM_CHAT_ID","").strip()
-    if not tok or not cid: return
-    chunks = [text[i:i+3500] for i in range(0, len(text), 3500)]
+    if not tok or not cid:
+        return
+    text = markdown_to_text(md_text)
+    chunks = [text[i:i + 3500] for i in range(0, len(text), 3500)]
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
         for ch in chunks:
             try:
