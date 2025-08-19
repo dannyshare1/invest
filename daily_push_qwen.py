@@ -21,9 +21,7 @@ import httpx
 from datetime import datetime, timezone, timedelta
 
 TZ = timezone(timedelta(hours=8))
-timeout = float(os.getenv("QWEN_TIMEOUT", "30"))
-read_timeout = float(os.getenv("QWEN_READ_TIMEOUT", "90"))
-REQ_TIMEOUT = httpx.Timeout(timeout, read=read_timeout)
+REQ_TIMEOUT = 30.0
 
 QWEN_API = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
 QWEN_MODEL = "qwen-plus-latest"
@@ -158,42 +156,59 @@ def md_to_telegram_html(md_text: str) -> str:
     return text
 
 
-def split_for_telegram(html: str, limit: int = 3500) -> list[str]:
-    """稳健切片：空行 > 行 > 字符，确保内容不丢失"""
-    if len(html) <= limit:
-        return [html]
-    parts: list[str] = []
-    cur = ""
-    paras = re.split(r'\n{2,}', html)  # 先按空行切
-    for p in paras:
-        if len(cur) + (2 if cur else 0) + len(p) <= limit:
-            cur = (cur + ("\n\n" if cur else "") + p)
-            continue
+def split_by_sections(html: str) -> list[str]:
+    """按 1)/2)/3) 这类小标题切块，天然更短更清晰"""
+    # 保留分隔符：把分隔符放回到每段开头
+    parts = re.split(r'(?=<b>\s*\d\)\s)', html)
+    parts = [p.strip() for p in parts if p.strip()]
+    return parts if parts else [html]
+
+
+def split_for_telegram(html: str, limit: int = 3900) -> list[str]:
+    """稳健切片：章节 > 段落 > 行 > 字符；并做完整性校验"""
+
+    def chunk_block(block: str) -> list[str]:
+        if len(block) <= limit:
+            return [block]
+        out = []
+        # 1) 段落
+        cur = ""
+        for para in re.split(r'\n{2,}', block):
+            if len(cur) + (2 if cur else 0) + len(para) <= limit:
+                cur = (cur + ("\n\n" if cur else "") + para)
+                continue
+            if cur:
+                out.append(cur)
+                cur = ""
+            # 2) 行
+            buf = ""
+            for ln in para.splitlines():
+                if len(buf) + (1 if buf else 0) + len(ln) <= limit:
+                    buf = (buf + ("\n" if buf else "") + ln)
+                else:
+                    if buf:
+                        out.append(buf)
+                        buf = ""
+                    # 3) 字符兜底
+                    for i in range(0, len(ln), limit):
+                        seg = ln[i:i+limit]
+                        if len(seg) == limit:
+                            out.append(seg)
+                        else:
+                            buf = seg
+            if buf:
+                out.append(buf)
         if cur:
-            parts.append(cur)
-            cur = ""
-        # 单段过长：按行切
-        block = ""
-        lines = p.splitlines()
-        for ln in lines:
-            if len(block) + (1 if block else 0) + len(ln) <= limit:
-                block = (block + ("\n" if block else "") + ln)
-            else:
-                if block:
-                    parts.append(block)
-                    block = ""
-                # 单行仍过长：按字符切
-                for i in range(0, len(ln), limit):
-                    chunk = ln[i:i+limit]
-                    if len(chunk) == limit:
-                        parts.append(chunk)
-                    else:
-                        block = chunk
-        if block:
-            cur = block
-    if cur:
-        parts.append(cur)
-    return parts
+            out.append(cur)
+        return out
+
+    chunks = []
+    for sec in split_by_sections(html):
+        chunks.extend(chunk_block(sec))
+
+    # 发送前做完整性校验（确保无丢字）
+    assert "".join(chunks) == html, "split_for_telegram: 内容在切分时丢失"
+    return chunks
 
 
 async def push_telegram(md_text: str):
@@ -202,7 +217,8 @@ async def push_telegram(md_text: str):
     if not token or not chat_id:
         return
     html = md_to_telegram_html(md_text)
-    chunks = split_for_telegram(html)
+    chunks = split_for_telegram(html)  # ≤3900/条
+    print("TG length:", len(html), "chunks:", [len(c) for c in chunks])
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
         for i, body in enumerate(chunks, 1):
             await c.post(
