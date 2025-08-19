@@ -19,50 +19,6 @@ from pathlib import Path
 from typing import List, Dict
 import httpx
 from datetime import datetime, timezone, timedelta
-from bs4 import BeautifulSoup
-
-
-def markdown_to_html(md: str) -> str:
-    """Convert Markdown text to HTML with basic extensions."""
-    try:
-        import markdown
-    except Exception:
-        return md
-    return markdown.markdown(
-        md, extensions=["tables", "fenced_code", "sane_lists"]
-    )
-
-
-def markdown_to_text(md: str) -> str:
-    """Convert Markdown to plain text for Telegram."""
-    html = markdown_to_html(md)
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Preserve code blocks
-    for pre in soup.find_all("pre"):
-        pre.replace_with("\n```\n" + pre.get_text() + "\n```\n")
-
-    # Tables → bullet lists
-    for tbl in soup.find_all("table"):
-        headers = [th.get_text(" ", strip=True) for th in tbl.select("tr th")]
-        lines: List[str] = []
-        for tr in tbl.select("tr"):
-            cells = [td.get_text(" ", strip=True) for td in tr.select("td")]
-            if not cells:
-                continue
-            parts = (
-                [f"{h}: {c}" for h, c in zip(headers, cells)]
-                if headers and len(headers) == len(cells) else cells
-            )
-            lines.append("- " + "; ".join(parts))
-        tbl.replace_with("\n".join(lines) + "\n")
-
-    # Links → text (URL)
-    for a in soup.find_all("a"):
-        a.replace_with(f"{a.get_text(strip=True)} ({a.get('href')})")
-
-    text = soup.get_text("\n", strip=True)
-    return re.sub(r"\n{3,}", "\n\n", text)
 
 TZ = timezone(timedelta(hours=8))
 timeout = float(os.getenv("QWEN_TIMEOUT", "30"))
@@ -143,23 +99,97 @@ async def push_serverchan(md_text: str):
         except httpx.HTTPError as e:
             print(f"ServerChan push failed: {e}")
 
+def _html_escape(s: str) -> str:
+    return (s.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def _md_tables_to_bullets(lines: list[str]) -> list[str]:
+    """把 Markdown 表格块转为要点列表：每行一只标的，短理由"""
+    out = []
+    i = 0
+    while i < len(lines):
+        if lines[i].lstrip().startswith("|"):
+            tbl = []
+            while i < len(lines) and lines[i].lstrip().startswith("|"):
+                tbl.append(lines[i]); i += 1
+            if len(tbl) >= 2:
+                header = [h.strip() for h in tbl[0].strip("|").split("|")]
+                # 跳过对齐行
+                data_rows = [r for r in tbl[1:] if not set(r.strip("|").strip()).issubset(set("-:| "))]
+                for r in data_rows:
+                    cols = [c.strip() for c in r.strip("|").split("|")]
+                    rec = dict(zip(header, cols))
+                    name = rec.get("持仓标的") or rec.get("标的") or cols[0]
+                    adv  = rec.get("建议") or rec.get("操作") or ""
+                    why  = rec.get("理由（≤50字）") or rec.get("理由") or ""
+                    out.append(f"• {name} — <b>{_html_escape(adv)}</b>｜理由：{_html_escape(why)}")
+            else:
+                out.extend(tbl)  # 非标准表格就原样
+        else:
+            out.append(lines[i]); i += 1
+    return out
+
+
+def md_to_telegram_html(md_text: str) -> str:
+    """轻量 Markdown -> Telegram HTML（标题加粗、表格转要点、项目符号、美化引用）"""
+    lines = md_text.splitlines()
+
+    # 1) 表格 -> 要点
+    lines = _md_tables_to_bullets(lines)
+
+    text = "\n".join(lines)
+    text = _html_escape(text)
+
+    # 2) 标题、粗体、列表符号
+    # ### / ## / # -> <b>…</b>
+    text = re.sub(r'(?m)^(#{1,6})\s*([^\n]+)$',
+                  lambda m: f"<b>{m.group(2).strip()}</b>", text)
+    # **bold** -> <b>bold</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    # 引用 > -> 竖线
+    text = re.sub(r'(?m)^&gt;\s*', '│ ', text)
+    # 列表 - -> •
+    text = re.sub(r'(?m)^\s*-\s+', '• ', text)
+
+    # 3) 连续空行压缩
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+    return text
+
+
+def split_for_telegram(html: str, limit: int = 3500) -> list[str]:
+    """按段落/标题优先切块，避免 4096 限制"""
+    if len(html) <= limit:
+        return [html]
+    parts, cur = [], []
+    for para in re.split(r'\n(?=<b>|\u2022|•|\n)', html):
+        if sum(len(p) for p in cur) + len(para) + 1 > limit:
+            parts.append("\n".join(cur)); cur = [para]
+        else:
+            cur.append(para)
+    if cur: parts.append("\n".join(cur))
+    return parts
+
+
 async def push_telegram(md_text: str):
-    tok = os.getenv("TELEGRAM_BOT_TOKEN","").strip()
-    cid = os.getenv("TELEGRAM_CHAT_ID","").strip()
-    if not tok or not cid:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
         return
-    text = markdown_to_text(md_text)
-    chunks = [text[i:i + 3500] for i in range(0, len(text), 3500)]
+    html = md_to_telegram_html(md_text)
+    chunks = split_for_telegram(html)
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
-        for ch in chunks:
-            try:
-                r = await c.post(
-                    f"https://api.telegram.org/bot{tok}/sendMessage",
-                    data={"chat_id": cid, "text": ch},
-                )
-                r.raise_for_status()
-            except httpx.HTTPError as e:
-                print(f"Telegram push failed: {e}")
+        for i, body in enumerate(chunks, 1):
+            await c.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data={
+                    "chat_id": chat_id,
+                    "text": body,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True
+                }
+            )
 
 def build_prompt(holds: List[Dict], briefing: str) -> str:
     secs = ", ".join(infer_sectors(holds)) or "-"
