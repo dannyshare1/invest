@@ -129,12 +129,15 @@ async def push_serverchan(md_text: str):
     key = os.getenv("SCKEY","").strip()
     if not key:
         return
-    html = markdown_to_html(md_text)
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
         try:
             r = await c.post(
                 f"https://sctapi.ftqq.com/{key}.send",
-                data={"text": "每日提示", "desp": html},
+                data={
+                    "title": "每日提示",   # 标题
+                    "desp": md_text       # 直接传 Markdown
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"},
             )
             r.raise_for_status()
         except httpx.HTTPError as e:
