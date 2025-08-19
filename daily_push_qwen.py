@@ -106,7 +106,7 @@ def _html_escape(s: str) -> str:
 
 
 def _md_tables_to_bullets(lines: list[str]) -> list[str]:
-    """把 Markdown 表格块转为要点列表：每行一只标的，短理由"""
+    """把 Markdown 表格块转为要点列表：每行一只标的，短理由（操作用 ** 占位避免被转义）"""
     out = []
     i = 0
     while i < len(lines):
@@ -124,7 +124,7 @@ def _md_tables_to_bullets(lines: list[str]) -> list[str]:
                     name = rec.get("持仓标的") or rec.get("标的") or cols[0]
                     adv  = rec.get("建议") or rec.get("操作") or ""
                     why  = rec.get("理由（≤50字）") or rec.get("理由") or ""
-                    out.append(f"• {name} — <b>{_html_escape(adv)}</b>｜理由：{_html_escape(why)}")
+                    out.append(f"• {name} — **{adv}**｜理由：{why}")
             else:
                 out.extend(tbl)  # 非标准表格就原样
         else:
@@ -159,16 +159,40 @@ def md_to_telegram_html(md_text: str) -> str:
 
 
 def split_for_telegram(html: str, limit: int = 3500) -> list[str]:
-    """按段落/标题优先切块，避免 4096 限制"""
+    """稳健切片：空行 > 行 > 字符，确保内容不丢失"""
     if len(html) <= limit:
         return [html]
-    parts, cur = [], []
-    for para in re.split(r'\n(?=<b>|\u2022|•|\n)', html):
-        if sum(len(p) for p in cur) + len(para) + 1 > limit:
-            parts.append("\n".join(cur)); cur = [para]
-        else:
-            cur.append(para)
-    if cur: parts.append("\n".join(cur))
+    parts: list[str] = []
+    cur = ""
+    paras = re.split(r'\n{2,}', html)  # 先按空行切
+    for p in paras:
+        if len(cur) + (2 if cur else 0) + len(p) <= limit:
+            cur = (cur + ("\n\n" if cur else "") + p)
+            continue
+        if cur:
+            parts.append(cur)
+            cur = ""
+        # 单段过长：按行切
+        block = ""
+        lines = p.splitlines()
+        for ln in lines:
+            if len(block) + (1 if block else 0) + len(ln) <= limit:
+                block = (block + ("\n" if block else "") + ln)
+            else:
+                if block:
+                    parts.append(block)
+                    block = ""
+                # 单行仍过长：按字符切
+                for i in range(0, len(ln), limit):
+                    chunk = ln[i:i+limit]
+                    if len(chunk) == limit:
+                        parts.append(chunk)
+                    else:
+                        block = chunk
+        if block:
+            cur = block
+    if cur:
+        parts.append(cur)
     return parts
 
 
