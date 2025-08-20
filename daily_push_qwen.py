@@ -211,25 +211,88 @@ def split_for_telegram(html: str, limit: int = 3900) -> list[str]:
     return chunks
 
 
+def _strip_html(s: str) -> str:
+    """移除所有 HTML 标签，作为 Telegram 发送失败时的兜底"""
+    return re.sub(r"</?[^>]+>", "", s)
+
+
+def safe_split_for_telegram(html: str, limit: int = 3900) -> list[str]:
+    """对 split_for_telegram 增强：断言失败时退回等长切片，永不抛异常"""
+    try:
+        return split_for_telegram(html, limit)
+    except AssertionError as e:
+        print("split_for_telegram assertion failed, fallback:", e)
+        return [html[i:i + limit] for i in range(0, len(html), limit)]
+
+
 async def push_telegram(md_text: str):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
+        print("TG env missing")
         return
+
     html = md_to_telegram_html(md_text)
-    chunks = split_for_telegram(html)  # ≤3900/条
+    chunks = safe_split_for_telegram(html)  # ≤3900/条，永不抛异常
     print("TG length:", len(html), "chunks:", [len(c) for c in chunks])
+
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
+        # 预检 token（可选，但能快速发现 token/网络问题）
+        try:
+            gm = await c.get(f"https://api.telegram.org/bot{token}/getMe")
+            if gm.status_code != 200:
+                print("getMe failed:", gm.status_code, gm.text)
+        except httpx.RequestError as e:
+            print("TG getMe network error:", e)
+            return
+
         for i, body in enumerate(chunks, 1):
-            await c.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                data={
-                    "chat_id": chat_id,
-                    "text": body,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True
-                }
-            )
+            try:
+                r = await c.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    data={
+                        "chat_id": chat_id,
+                        "text": body,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                    },
+                )
+
+                if r.status_code != 200 or not r.json().get("ok", False):
+                    desc = ""
+                    try:
+                        desc = r.json().get("description", "")
+                    except Exception:
+                        desc = r.text
+                    print(f"TG send {i}/{len(chunks)} failed:", desc)
+
+                    # 典型错误自动兜底一次
+                    if "entities" in desc:
+                        # HTML 解析失败 -> 发送纯文本
+                        plain = _strip_html(body)
+                        r2 = await c.post(
+                            f"https://api.telegram.org/bot{token}/sendMessage",
+                            data={
+                                "chat_id": chat_id,
+                                "text": plain,
+                                "disable_web_page_preview": True,
+                            },
+                        )
+                        print("fallback plain:", r2.status_code, r2.text[:120])
+                    elif "message is too long" in desc.lower():
+                        # 极少数边界再切小点重试
+                        for seg in safe_split_for_telegram(body, limit=3000):
+                            await c.post(
+                                f"https://api.telegram.org/bot{token}/sendMessage",
+                                data={
+                                    "chat_id": chat_id,
+                                    "text": seg,
+                                    "parse_mode": "HTML",
+                                    "disable_web_page_preview": True,
+                                },
+                            )
+            except httpx.RequestError as e:
+                print(f"TG send network error on part {i}: {e}")
 
 def build_prompt(holds: List[Dict], briefing: str) -> str:
     secs = ", ".join(infer_sectors(holds)) or "-"
