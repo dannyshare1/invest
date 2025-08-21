@@ -11,6 +11,7 @@ daily_push_qwen.py — 基于 briefing.txt + 持仓，生成当日中文投资�
 - SCKEY
 - TELEGRAM_BOT_TOKEN
 - TELEGRAM_CHAT_ID
+- QWEN_TIMEOUT (optional, seconds)
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import httpx
 from datetime import datetime, timezone, timedelta
 
 TZ = timezone(timedelta(hours=8))
-REQ_TIMEOUT = 30.0
+REQ_TIMEOUT = float(os.getenv("QWEN_TIMEOUT", "60"))
 
 QWEN_API = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
 QWEN_MODEL = "qwen-plus-latest"
@@ -65,18 +66,20 @@ def infer_sectors(holds: List[Dict]) -> List[str]:
 async def call_qwen(prompt: str) -> str:
     headers = {"Content-Type":"application/json","Authorization":f"Bearer {os.getenv('QWEN_API_KEY','')}"}
     payload = {"model": QWEN_MODEL, "input":{"prompt": prompt}, "parameters":{"max_tokens":900,"temperature":0.7}}
-    async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
+    timeout = httpx.Timeout(REQ_TIMEOUT)
+    async with httpx.AsyncClient(timeout=timeout) as c:
         for attempt in range(3):
             try:
                 r = await c.post(QWEN_API, json=payload, headers=headers)
                 r.raise_for_status()
                 return r.json()["output"]["text"].strip()
             except (httpx.ReadTimeout, httpx.RequestError) as e:
+                name = type(e).__name__
                 if attempt == 2:
-                    print(f"Qwen request failed after {attempt+1} attempts: {e}")
+                    print(f"Qwen request failed after {attempt+1} attempts: {name}: {e}")
                     raise
                 delay = 2 ** attempt
-                print(f"Qwen request error (attempt {attempt+1}/3): {e}; retrying in {delay}s")
+                print(f"Qwen request error (attempt {attempt+1}/3): {name}: {e}; retrying in {delay}s")
                 await asyncio.sleep(delay)
 
 async def push_serverchan(md_text: str):
