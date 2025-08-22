@@ -29,6 +29,7 @@ jobs:
       SCKEY: ${{ secrets.SCKEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      BARK_KEY: ${{ secrets.BARK_KEY }}
 
       # 采集器的可调参数（保持原值）
       SPAN_DAYS: 3
