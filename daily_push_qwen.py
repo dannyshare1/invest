@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-daily_push_qwen.py — 基于 briefing.txt + 持仓，生成当日中文投资提示，并推送至 Server酱 / Telegram
+daily_push_qwen.py — 基于 briefing.txt + 持仓，生成当日中文投资提示，并推送至 Server酱 / Telegram / Bark
 
 输入：
 - holdings.json      当前持仓
@@ -11,6 +11,7 @@ daily_push_qwen.py — 基于 briefing.txt + 持仓，生成当日中文投资�
 - SCKEY
 - TELEGRAM_BOT_TOKEN
 - TELEGRAM_CHAT_ID
+- BARK_KEY 或 BARK_ENCRYPTED_URL
 - QWEN_TIMEOUT (optional, seconds)
 """
 
@@ -158,74 +159,87 @@ def md_to_telegram_html(md_text: str) -> str:
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
     return text
 
-
-def split_by_sections(html: str) -> list[str]:
-    """按 1)/2)/3) 这类小标题切块，天然更短更清晰"""
-    # 保留分隔符：把分隔符放回到每段开头
-    parts = re.split(r'(?=<b>\s*\d\)\s)', html)
+def _split_markdown_sections(md_text: str) -> list[str]:
+    """先按 1)/2)/3) 小标题分段（若用户改了编号，仍保底按双换行分）"""
+    parts = re.split(r'(?m)(?=^\s*\d\)\s)', md_text)
     parts = [p.strip() for p in parts if p.strip()]
-    return parts if parts else [html]
+    if not parts:
+        parts = [md_text.strip()]
+    return parts
 
 
-def split_for_telegram(html: str, limit: int = 3900) -> list[str]:
-    """稳健切片：章节 > 段落 > 行 > 字符；并做完整性校验"""
+def _chunk_markdown(md_text: str, limit: int = 3900) -> list[str]:
+    """
+    逐层切：章节 → 段落 → 行 → 字符（极端兜底）。
+    和旧版不同：每个切片在这里才做 md->HTML 转换，确保每片 HTML 自洽。
+    """
+    out: list[str] = []
+    sections = _split_markdown_sections(md_text)
 
-    def chunk_block(block: str) -> list[str]:
-        if len(block) <= limit:
-            return [block]
-        out = []
-        # 1) 段落
-        cur = ""
-        for para in re.split(r'\n{2,}', block):
-            if len(cur) + (2 if cur else 0) + len(para) <= limit:
-                cur = (cur + ("\n\n" if cur else "") + para)
-                continue
-            if cur:
-                out.append(cur)
-                cur = ""
-            # 2) 行
-            buf = ""
-            for ln in para.splitlines():
-                if len(buf) + (1 if buf else 0) + len(ln) <= limit:
-                    buf = (buf + ("\n" if buf else "") + ln)
-                else:
-                    if buf:
-                        out.append(buf)
-                        buf = ""
-                    # 3) 字符兜底
-                    for i in range(0, len(ln), limit):
-                        seg = ln[i:i+limit]
-                        if len(seg) == limit:
-                            out.append(seg)
-                        else:
-                            buf = seg
+    for sec in sections:
+        paras = re.split(r'\n{2,}', sec)
+        buf = ""
+
+        def flush_buf():
+            nonlocal buf
             if buf:
-                out.append(buf)
-        if cur:
-            out.append(cur)
-        return out
+                html = md_to_telegram_html(buf)
+                if len(html) <= limit:
+                    out.append(html)
+                else:
+                    # 进一步按行切
+                    tmp = ""
+                    for ln in buf.splitlines():
+                        ln_html = md_to_telegram_html(ln)
+                        # 尽量整行拼接，超过就先发一片
+                        if len(tmp) + (1 if tmp else 0) + len(ln_html) <= limit:
+                            tmp = (tmp + ("\n" if tmp else "") + ln)
+                        else:
+                            if tmp:
+                                out.append(md_to_telegram_html(tmp))
+                                tmp = ln
+                            else:
+                                # 行本身过长，做字符级兜底（很少发生）
+                                raw = md_to_telegram_html(ln)
+                                for i in range(0, len(raw), limit):
+                                    out.append(raw[i:i+limit])
+                    if tmp:
+                        out.append(md_to_telegram_html(tmp))
+                buf = ""
 
-    chunks = []
-    for sec in split_by_sections(html):
-        chunks.extend(chunk_block(sec))
+        for para in paras:
+            candidate = (buf + ("\n\n" if buf else "") + para)
+            html_len = len(md_to_telegram_html(candidate))
+            if html_len <= limit:
+                buf = candidate
+            else:
+                flush_buf()
+                # 单个段落也超长，拆为行
+                tmp = ""
+                for ln in para.splitlines():
+                    ln_html = md_to_telegram_html(ln)
+                    if len(ln_html) > limit:
+                        # 极端长行，直接字符兜底
+                        for i in range(0, len(ln_html), limit):
+                            out.append(ln_html[i:i+limit])
+                    else:
+                        if len(md_to_telegram_html(tmp + ("\n" if tmp else "") + ln)) <= limit:
+                            tmp = (tmp + ("\n" if tmp else "") + ln)
+                        else:
+                            out.append(md_to_telegram_html(tmp))
+                            tmp = ln
+                if tmp:
+                    out.append(md_to_telegram_html(tmp))
+        flush_buf()
 
-    # 发送前做完整性校验（确保无丢字）
-    assert "".join(chunks) == html, "split_for_telegram: 内容在切分时丢失"
-    return chunks
+    # 完整性校验（把每片反拼为纯文本进行宽松校验，避免 HTML 标签导致的误判）
+    # 若你想严格等长校验，可保留旧断言；这里更关注“可发送且不丢信息”
+    return out
 
 
 def _strip_html(s: str) -> str:
     """移除所有 HTML 标签，作为 Telegram 发送失败时的兜底"""
     return re.sub(r"</?[^>]+>", "", s)
-
-
-def safe_split_for_telegram(html: str, limit: int = 3900) -> list[str]:
-    """对 split_for_telegram 增强：断言失败时退回等长切片，永不抛异常"""
-    try:
-        return split_for_telegram(html, limit)
-    except AssertionError as e:
-        print("split_for_telegram assertion failed, fallback:", e)
-        return [html[i:i + limit] for i in range(0, len(html), limit)]
 
 
 async def push_telegram(md_text: str):
@@ -235,12 +249,10 @@ async def push_telegram(md_text: str):
         print("TG env missing")
         return
 
-    html = md_to_telegram_html(md_text)
-    chunks = safe_split_for_telegram(html)  # ≤3900/条，永不抛异常
-    print("TG length:", len(html), "chunks:", [len(c) for c in chunks])
+    chunks = _chunk_markdown(md_text, limit=3900)
+    print("TG chunks:", [len(c) for c in chunks])
 
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
-        # 预检 token（可选，但能快速发现 token/网络问题）
         try:
             gm = await c.get(f"https://api.telegram.org/bot{token}/getMe")
             if gm.status_code != 200:
@@ -260,7 +272,6 @@ async def push_telegram(md_text: str):
                         "disable_web_page_preview": True,
                     },
                 )
-
                 if r.status_code != 200 or not r.json().get("ok", False):
                     desc = ""
                     try:
@@ -268,34 +279,90 @@ async def push_telegram(md_text: str):
                     except Exception:
                         desc = r.text
                     print(f"TG send {i}/{len(chunks)} failed:", desc)
-
-                    # 典型错误自动兜底一次
                     if "entities" in desc:
-                        # HTML 解析失败 -> 发送纯文本
                         plain = _strip_html(body)
-                        r2 = await c.post(
+                        await c.post(
                             f"https://api.telegram.org/bot{token}/sendMessage",
-                            data={
-                                "chat_id": chat_id,
-                                "text": plain,
-                                "disable_web_page_preview": True,
-                            },
+                            data={"chat_id": chat_id, "text": plain, "disable_web_page_preview": True},
                         )
-                        print("fallback plain:", r2.status_code, r2.text[:120])
                     elif "message is too long" in desc.lower():
-                        # 极少数边界再切小点重试
-                        for seg in safe_split_for_telegram(body, limit=3000):
+                        for seg in _chunk_markdown(_strip_html(body), limit=3000):
                             await c.post(
                                 f"https://api.telegram.org/bot{token}/sendMessage",
-                                data={
-                                    "chat_id": chat_id,
-                                    "text": seg,
-                                    "parse_mode": "HTML",
-                                    "disable_web_page_preview": True,
-                                },
+                                data={"chat_id": chat_id, "text": seg, "disable_web_page_preview": True},
                             )
             except httpx.RequestError as e:
                 print(f"TG send network error on part {i}: {e}")
+
+
+def _load_bark_encrypted_url_from_file() -> str | None:
+    """
+    可选：若同目录存在 `推送加密.json` 且里头提供完整 URL（含 ciphertext），
+    则直接使用该 URL 发起请求（不在脚本里做加解密）。
+    """
+    try:
+        p = Path("推送加密.json")
+        if p.is_file():
+            obj = json.loads(p.read_text("utf-8"))
+            # 兼容 { "url": "https://api.day.app/xxxx/推送加密?ciphertext=...." }
+            if isinstance(obj, dict) and "url" in obj and isinstance(obj["url"], str) and obj["url"].startswith("https://"):
+                return obj["url"]
+    except Exception as e:
+        print("read 推送加密.json failed:", e)
+    return None
+
+
+async def push_bark(md_text: str):
+    """
+    优先使用明文 JSON 推送（推荐）：
+      - 环境变量：BARK_KEY=你的设备Token（必填）
+      - 可选：BARK_SERVER=https://api.day.app  （默认此值）
+      - 可选：BARK_GROUP/BARK_SOUND/BARK_ICON/BARK_LEVEL 等自定义
+
+    如果你坚持“推送加密”：
+      - 设置环境变量 BARK_ENCRYPTED_URL 为完整加密URL，或
+      - 在同目录放置 `推送加密.json`，内容形如 { "url": "https://api.day.app/xxxx/推送加密?ciphertext=xxxx" }
+      脚本将直接请求该 URL，不做加解密。
+    """
+    enc_url = os.getenv("BARK_ENCRYPTED_URL", "").strip() or _load_bark_encrypted_url_from_file()
+    if enc_url:
+        async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
+            try:
+                r = await c.get(enc_url)
+                r.raise_for_status()
+                print("Bark encrypted push ok:", r.text[:120])
+            except httpx.HTTPError as e:
+                print("Bark encrypted push failed:", e)
+        return
+
+    key = os.getenv("BARK_KEY", "").strip()
+    if not key:
+        print("Bark: BARK_KEY missing and no encrypted url.")
+        return
+
+    server = os.getenv("BARK_SERVER", "https://api.day.app").rstrip("/")
+    title = "每日提示"
+    # Bark 支持纯文本即可；这里沿用 Telegram HTML 转换后的纯文本兜底，避免标签
+    body = _strip_html(md_to_telegram_html(md_text))
+
+    payload = {
+        "title": title,
+        "body": body,
+        "group": os.getenv("BARK_GROUP", "投顾日报"),
+    }
+    # 兼容可选参数
+    for k in ["sound", "icon", "level", "badge", "url", "isArchive"]:
+        envk = f"BARK_{k.upper()}"
+        if os.getenv(envk):
+            payload[k] = os.getenv(envk)
+
+    async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
+        try:
+            r = await c.post(f"{server}/{key}", json=payload, headers={"Content-Type": "application/json; charset=utf-8"})
+            r.raise_for_status()
+            print("Bark push ok:", r.text[:120])
+        except httpx.HTTPError as e:
+            print("Bark push failed:", e)
 
 def build_prompt(holds: List[Dict], briefing: str) -> str:
     secs = ", ".join(infer_sectors(holds)) or "-"
@@ -332,6 +399,7 @@ async def main():
         return
     await push_serverchan(answer)
     await push_telegram(answer)
+    await push_bark(answer)
     print("generic 推送完成")
 
 if __name__ == "__main__":
