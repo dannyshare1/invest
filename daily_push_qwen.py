@@ -301,7 +301,9 @@ def build_prompt(holds: List[Dict], briefing: str) -> str:
     secs = ", ".join(infer_sectors(holds)) or "-"
     today = now_date()
     return textwrap.dedent(f"""
-    你是一名专业中国投资策略分析师，请根据以下持仓和市场新闻为 C5 进取型投资者生成投资建议。
+    Search for the prior trading day's key market news covering my current holdings相关行业(红利/高股息、半导体、蓝筹(沪深300)、债券、大消费、大宗商品等)，
+    请根据以下持仓和市场新闻为 C5 进取型投资者生成专业、简洁的投资建议(维持、加仓、减仓、调仓等)。
+    如当前市场适合定投，请明确标的、频率与理由;如某类资产存在阶段性高位或风险，请提示止盈或风控策略。
     日期：{today}
     行业聚焦：{secs}
 
@@ -311,12 +313,12 @@ def build_prompt(holds: List[Dict], briefing: str) -> str:
     【今日命中资讯（节选，无链接）】
     {briefing}
 
-    请输出三部分：
-    1) 先给出 3-5 条市场要点。
-    2) 对每个持仓标的给出“维持/加仓/减仓/调仓”及 ≤50 字理由。
-    3) 如有新的定投机会或风险提示，请列出。
-    """).strip()
-
+    请输出三部分(语言简洁，条理清晰)：
+    1) 前一交易日重点新闻摘要。
+    2) 仓位操作建议:。
+    3) 可选:定投与止盈策略与触发条件
+        """).strip()
+    
 async def main():
     holds = load_holdings()
     briefing = load_briefing()
