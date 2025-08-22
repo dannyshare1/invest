@@ -87,6 +87,7 @@ jobs:
             errors.log
             logs-and-history-*.zip
             sources.yml
+            qwen_answer.md
 
       - name: Commit back updated sources.yml (ok/失败次数回写)
         if: always()
