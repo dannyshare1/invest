@@ -20,10 +20,9 @@ from pathlib import Path
 from typing import List, Dict
 import httpx
 from datetime import datetime, timezone, timedelta
-from urllib.parse import quote
 
 TZ = timezone(timedelta(hours=8))
-REQ_TIMEOUT = float(os.getenv("QWEN_TIMEOUT", "60"))
+REQ_TIMEOUT = float(os.getenv("QWEN_TIMEOUT", "120"))
 
 QWEN_API = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
 QWEN_MODEL = "qwen-plus-latest"
@@ -66,7 +65,7 @@ def infer_sectors(holds: List[Dict]) -> List[str]:
 
 async def call_qwen(prompt: str) -> str:
     headers = {"Content-Type":"application/json","Authorization":f"Bearer {os.getenv('QWEN_API_KEY','')}"}
-    payload = {"model": QWEN_MODEL, "input":{"prompt": prompt}, "parameters":{"max_tokens":900,"temperature":0.7}}
+    payload = {"model": QWEN_MODEL, "input":{"prompt": prompt}, "parameters":{"max_tokens":3000,"temperature":0.7}}
     timeout = httpx.Timeout(REQ_TIMEOUT)
     async with httpx.AsyncClient(timeout=timeout) as c:
         for attempt in range(3):
@@ -337,10 +336,16 @@ async def push_telegram(md_text: str):
 
 async def push_bark(md_text: str):
     body = _strip_html(md_to_telegram_html(md_text))
-    url = "https://api.day.app/q4dLK39Yrgo7jLywyxd4o5/" + quote(body)
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
         try:
-            r = await c.get(url)
+            r = await c.post(
+                "https://api.day.app/push",
+                json={
+                    "device_key": "q4dLK39Yrgo7jLywyxd4o5",
+                    "title": "每日提示",
+                    "body": body[:3500],
+                },
+            )
             r.raise_for_status()
             print("Bark push ok:", r.text[:120])
         except httpx.HTTPError as e:
@@ -379,6 +384,14 @@ async def main():
     except Exception as e:
         print(f"Qwen 调用失败：{type(e).__name__}: {e}")
         return
+    if "2)" not in answer or "3)" not in answer:
+        try:
+            supplement = await call_qwen(
+                f"{prompt}\n\n{answer}\n\n从缺失的小节继续，勿重复已输出内容"
+            )
+            answer = (answer.strip() + "\n" + supplement.strip()).strip()
+        except Exception as e:
+            print(f"Qwen 补写失败：{type(e).__name__}: {e}")
     Path("qwen_answer.md").write_text(answer, "utf-8")
     await push_serverchan(answer)
     await push_telegram(answer)

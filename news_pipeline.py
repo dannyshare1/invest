@@ -65,7 +65,7 @@ NEWSAPI_KEY      = os.getenv("NEWSAPI_KEY", "").strip()
 MEDIASTACK_KEY   = os.getenv("MEDIASTACK_KEY", "").strip()
 CHINESE_ONLY     = os.getenv("CHINESE_ONLY", "0").strip() == "1"  # 默认开放英文
 QWEN_MAX_RETRIES = max(1, int(os.getenv("QWEN_MAX_RETRIES", "3")))
-QWEN_TIMEOUT     = float(os.getenv("QWEN_TIMEOUT", "20"))
+QWEN_TIMEOUT     = float(os.getenv("QWEN_TIMEOUT", "120"))
 
 # API 分页/批次
 API_MAX_PAGES    = max(1, int(os.getenv("API_MAX_PAGES", "2")))
@@ -232,7 +232,7 @@ async def qwen_expand_keywords(
     )
     API = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     hdr = {"Content-Type":"application/json","Authorization":f"Bearer {QWEN_API_KEY}"}
-    pl  = {"model":"qwen-plus","input":{"prompt":prompt},"parameters":{"max_tokens":800,"temperature":0.7}}
+    pl  = {"model":"qwen-plus","input":{"prompt":prompt},"parameters":{"max_tokens":3000,"temperature":0.7}}
     async with httpx.AsyncClient(timeout=timeout) as c:
         for attempt in range(max_retries):
             try:
