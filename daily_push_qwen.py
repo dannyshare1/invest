@@ -16,7 +16,7 @@ daily_push_qwen.py — 基于 briefing.txt + 持仓，生成当日中文投资�
 """
 
 from __future__ import annotations
-import asyncio, os, json, textwrap, re
+import asyncio, os, json, textwrap, re, html
 from pathlib import Path
 from typing import List, Dict
 import httpx
@@ -107,42 +107,82 @@ def _html_escape(s: str) -> str:
             .replace(">", "&gt;"))
 
 
-def _md_tables_to_bullets(lines: list[str]) -> list[str]:
-    """把 Markdown 表格块转为要点列表：每行一只标的，短理由（操作用 ** 占位避免被转义）"""
-    out = []
-    i = 0
+def md_table_to_bullets(md: str) -> list[str]:
+    """
+    将 Markdown 表格转为要点，兼容多种表头命名与错位。
+    期望列：资产/标的 | 当前持仓 | 建议操作 | 理由
+    """
+    lines = [ln for ln in md.splitlines() if ln.strip()]
+    out, i = [], 0
+
+    def norm(s: str) -> str:
+        return re.sub(r'\s+', '', s.replace('（', '(').replace('）', ')')).lower()
+
     while i < len(lines):
-        if lines[i].lstrip().startswith("|"):
-            tbl = []
-            while i < len(lines) and lines[i].lstrip().startswith("|"):
-                tbl.append(lines[i]); i += 1
-            if len(tbl) >= 2:
-                header = [h.strip() for h in tbl[0].strip("|").split("|")]
-                # 跳过对齐行
-                data_rows = [r for r in tbl[1:] if not set(r.strip("|").strip()).issubset(set("-:| "))]
-                for r in data_rows:
-                    cols = [c.strip() for c in r.strip("|").split("|")]
-                    rec = dict(zip(header, cols))
-                    name = rec.get("持仓标的") or rec.get("标的") or cols[0]
-                    adv  = rec.get("建议") or rec.get("操作") or ""
-                    why  = rec.get("理由（≤50字）") or rec.get("理由") or ""
-                    out.append(f"• {name} — **{adv}**｜理由：{why}")
-            else:
-                out.extend(tbl)  # 非标准表格就原样
-        else:
-            out.append(lines[i]); i += 1
+        if not lines[i].lstrip().startswith("|"):
+            i += 1
+            continue
+        # 收集连续表格行
+        tbl = []
+        while i < len(lines) and lines[i].lstrip().startswith("|"):
+            tbl.append(lines[i]); i += 1
+        if len(tbl) < 2:
+            continue
+
+        header = [h.strip() for h in tbl[0].strip("|").split("|")]
+        h_norm = [norm(h) for h in header]
+        # 找各列索引（找不到就按自然顺序兜底）
+        idx_name   = next((k for k,v in enumerate(h_norm) if v in ("持仓标的","标的","资产类别","资产","名称")), 0)
+        idx_hold   = next((k for k,v in enumerate(h_norm) if "当前持仓" in v or v=="持仓"), 1 if len(header)>1 else 0)
+        idx_action = next((k for k,v in enumerate(h_norm) if v in ("建议操作","建议调整","建议","操作")), 2 if len(header)>2 else min(2, len(header)-1))
+        idx_reason = next((k for k,v in enumerate(h_norm) if "理由" in v or "说明" in v), 3 if len(header)>3 else min(3, len(header)-1))
+
+        # 跳过分隔行
+        data_rows = [r for r in tbl[1:] if not set(r.strip("|").strip()).issubset(set("-:| "))]
+
+        for r in data_rows:
+            cols = [c.strip() for c in r.strip("|").split("|")]
+            # 列长度不够时右侧补空
+            if len(cols) < len(header):
+                cols += [""] * (len(header)-len(cols))
+
+            name   = cols[idx_name]   if idx_name   < len(cols) else cols[0]
+            action = cols[idx_action] if idx_action < len(cols) else (cols[2] if len(cols)>2 else "")
+            reason = cols[idx_reason] if idx_reason < len(cols) else ""
+
+            # 如果 action 是纯星号/空白，尝试用第3列兜底
+            if not action or re.fullmatch(r'\*{2,}', action):
+                if len(cols) > 2 and cols[2].strip():
+                    action = cols[2].strip()
+
+            # 显示：名称 — 粗体的动作｜理由
+            action_disp = f"<b>{html.escape(action)}</b>" if action else "维持"
+            reason_disp = html.escape(reason) if reason else "（无）"
+            out.append(f"• {html.escape(name)} — {action_disp}｜理由：{reason_disp}")
+
     return out
 
 
 def md_to_telegram_html(md_text: str) -> str:
     """轻量 Markdown -> Telegram HTML（标题加粗、表格转要点、项目符号、美化引用）"""
-    lines = md_text.splitlines()
-
-    # 1) 表格 -> 要点
-    lines = _md_tables_to_bullets(lines)
+    raw_lines = md_text.splitlines()
+    lines: list[str] = []
+    i = 0
+    while i < len(raw_lines):
+        if raw_lines[i].lstrip().startswith("|"):
+            tbl = []
+            while i < len(raw_lines) and raw_lines[i].lstrip().startswith("|"):
+                tbl.append(raw_lines[i]); i += 1
+            bullets = md_table_to_bullets("\n".join(tbl))
+            if bullets:
+                lines.extend(bullets)
+            else:
+                lines.extend(_html_escape(ln) for ln in tbl)
+        else:
+            lines.append(_html_escape(raw_lines[i]))
+            i += 1
 
     text = "\n".join(lines)
-    text = _html_escape(text)
 
     # 2) 标题、粗体、列表符号
     # ### / ## / # -> <b>…</b>
