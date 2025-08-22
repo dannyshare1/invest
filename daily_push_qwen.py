@@ -381,8 +381,8 @@ def build_prompt(holds: List[Dict], briefing: str) -> str:
     {briefing}
 
     请输出三部分(语言简洁，条理清晰)：
-    1) 前一交易日重点新闻摘要。
-    2) 仓位操作建议:。
+    1) 前一交易日重点新闻摘要
+    2) 仓位操作建议
     3) 可选:定投与止盈策略与触发条件
         """).strip()
     
