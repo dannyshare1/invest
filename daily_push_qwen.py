@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio, os, json, textwrap, re, html
 from pathlib import Path
 from typing import List, Dict
+from urllib.parse import quote
 import httpx
 from datetime import datetime, timezone, timedelta
 
@@ -336,20 +337,24 @@ async def push_telegram(md_text: str):
 
 async def push_bark(md_text: str):
     body = _strip_html(md_to_telegram_html(md_text))
+    key = "q4dLK39Yrgo7jLywyxd4o5"
+    title = "每日提示"
+    payload = {"device_key": key, "title": title, "body": body[:3500]}
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
         try:
-            r = await c.post(
-                "https://api.day.app/push",
-                json={
-                    "device_key": "q4dLK39Yrgo7jLywyxd4o5",
-                    "title": "每日提示",
-                    "body": body[:3500],
-                },
-            )
+            r = await c.post("https://api.day.app/push", json=payload)
             r.raise_for_status()
             print("Bark push ok:", r.text[:120])
         except httpx.HTTPError as e:
             print("Bark push failed:", e)
+            # Bark 偶尔返回 500，此时退化为路径参数方式重试
+            try:
+                url = f"https://api.day.app/{key}/{quote(title)}/{quote(body[:1800])}"
+                r = await c.get(url)
+                r.raise_for_status()
+                print("Bark fallback ok:", r.text[:120])
+            except httpx.HTTPError as e2:
+                print("Bark fallback failed:", e2)
 
 def build_prompt(holds: List[Dict], briefing: str) -> str:
     secs = ", ".join(infer_sectors(holds)) or "-"
