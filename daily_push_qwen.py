@@ -11,7 +11,6 @@ daily_push_qwen.py — 基于 briefing.txt + 持仓，生成当日中文投资�
 - SCKEY
 - TELEGRAM_BOT_TOKEN
 - TELEGRAM_CHAT_ID
-- BARK_KEY
 - QWEN_TIMEOUT (optional, seconds)
 """
 
@@ -21,6 +20,7 @@ from pathlib import Path
 from typing import List, Dict
 import httpx
 from datetime import datetime, timezone, timedelta
+from urllib.parse import quote
 
 TZ = timezone(timedelta(hours=8))
 REQ_TIMEOUT = float(os.getenv("QWEN_TIMEOUT", "60"))
@@ -336,31 +336,11 @@ async def push_telegram(md_text: str):
 
 
 async def push_bark(md_text: str):
-    key = os.getenv("BARK_KEY", "").strip()
-    if not key:
-        print("Bark: BARK_KEY missing."); return
-
-    server = os.getenv("BARK_SERVER", "https://api.day.app").rstrip("/")
-    title  = "每日提示"
-    # 转纯文本，避免 HTML 标签
-    body   = _strip_html(md_to_telegram_html(md_text))
-
-    payload = {
-        "device_key": key,               # ← 关键：放在 JSON 里
-        "title": title,
-        "body": body,
-        "group": os.getenv("BARK_GROUP", "投顾日报"),
-    }
-    # 可选参数
-    for k in ["sound", "icon", "level", "badge", "url", "isArchive"]:
-        envk = f"BARK_{k.upper()}"
-        if os.getenv(envk):
-            payload[k] = os.getenv(envk)
-
+    body = _strip_html(md_to_telegram_html(md_text))
+    url = "https://api.day.app/q4dLK39Yrgo7jLywyxd4o5/" + quote(body)
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
         try:
-            r = await c.post(f"{server}/push", json=payload,
-                             headers={"Content-Type": "application/json; charset=utf-8"})
+            r = await c.get(url)
             r.raise_for_status()
             print("Bark push ok:", r.text[:120])
         except httpx.HTTPError as e:
@@ -399,7 +379,7 @@ async def main():
     except Exception as e:
         print(f"Qwen 调用失败：{type(e).__name__}: {e}")
         return
-    Path("qwen_reply.md").write_text(answer, "utf-8")
+    Path("qwen_answer.md").write_text(answer, "utf-8")
     await push_serverchan(answer)
     await push_telegram(answer)
     await push_bark(answer)
