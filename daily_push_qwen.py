@@ -11,7 +11,7 @@ daily_push_qwen.py — 基于 briefing.txt + 持仓，生成当日中文投资�
 - SCKEY
 - TELEGRAM_BOT_TOKEN
 - TELEGRAM_CHAT_ID
-- BARK_KEY 或 BARK_ENCRYPTED_URL
+- BARK_KEY
 - QWEN_TIMEOUT (optional, seconds)
 """
 
@@ -335,62 +335,23 @@ async def push_telegram(md_text: str):
                 print(f"TG send network error on part {i}: {e}")
 
 
-def _load_bark_encrypted_url_from_file() -> str | None:
-    """
-    可选：若同目录存在 `推送加密.json` 且里头提供完整 URL（含 ciphertext），
-    则直接使用该 URL 发起请求（不在脚本里做加解密）。
-    """
-    try:
-        p = Path("推送加密.json")
-        if p.is_file():
-            obj = json.loads(p.read_text("utf-8"))
-            # 兼容 { "url": "https://api.day.app/xxxx/推送加密?ciphertext=...." }
-            if isinstance(obj, dict) and "url" in obj and isinstance(obj["url"], str) and obj["url"].startswith("https://"):
-                return obj["url"]
-    except Exception as e:
-        print("read 推送加密.json failed:", e)
-    return None
-
-
 async def push_bark(md_text: str):
-    """
-    优先使用明文 JSON 推送（推荐）：
-      - 环境变量：BARK_KEY=你的设备Token（必填）
-      - 可选：BARK_SERVER=https://api.day.app  （默认此值）
-      - 可选：BARK_GROUP/BARK_SOUND/BARK_ICON/BARK_LEVEL 等自定义
-
-    如果你坚持“推送加密”：
-      - 设置环境变量 BARK_ENCRYPTED_URL 为完整加密URL，或
-      - 在同目录放置 `推送加密.json`，内容形如 { "url": "https://api.day.app/xxxx/推送加密?ciphertext=xxxx" }
-      脚本将直接请求该 URL，不做加解密。
-    """
-    enc_url = os.getenv("BARK_ENCRYPTED_URL", "").strip() or _load_bark_encrypted_url_from_file()
-    if enc_url:
-        async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
-            try:
-                r = await c.get(enc_url)
-                r.raise_for_status()
-                print("Bark encrypted push ok:", r.text[:120])
-            except httpx.HTTPError as e:
-                print("Bark encrypted push failed:", e)
-        return
-
     key = os.getenv("BARK_KEY", "").strip()
     if not key:
-        print("Bark: BARK_KEY missing and no encrypted url.")
-        return
+        print("Bark: BARK_KEY missing."); return
 
     server = os.getenv("BARK_SERVER", "https://api.day.app").rstrip("/")
-    title = "每日提示"
-    # Bark 支持纯文本即可；这里沿用 Telegram HTML 转换后的纯文本兜底，避免标签
-    body = _strip_html(md_to_telegram_html(md_text))
+    title  = "每日提示"
+    # 转纯文本，避免 HTML 标签
+    body   = _strip_html(md_to_telegram_html(md_text))
 
     payload = {
+        "device_key": key,               # ← 关键：放在 JSON 里
         "title": title,
         "body": body,
         "group": os.getenv("BARK_GROUP", "投顾日报"),
     }
-    # 兼容可选参数
+    # 可选参数
     for k in ["sound", "icon", "level", "badge", "url", "isArchive"]:
         envk = f"BARK_{k.upper()}"
         if os.getenv(envk):
@@ -398,7 +359,8 @@ async def push_bark(md_text: str):
 
     async with httpx.AsyncClient(timeout=REQ_TIMEOUT) as c:
         try:
-            r = await c.post(f"{server}/{key}", json=payload, headers={"Content-Type": "application/json; charset=utf-8"})
+            r = await c.post(f"{server}/push", json=payload,
+                             headers={"Content-Type": "application/json; charset=utf-8"})
             r.raise_for_status()
             print("Bark push ok:", r.text[:120])
         except httpx.HTTPError as e:
@@ -437,6 +399,7 @@ async def main():
     except Exception as e:
         print(f"Qwen 调用失败：{type(e).__name__}: {e}")
         return
+    Path("qwen_reply.md").write_text(answer, "utf-8")
     await push_serverchan(answer)
     await push_telegram(answer)
     await push_bark(answer)
