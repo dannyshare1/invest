@@ -3,7 +3,7 @@
   url: https://rsshub.app/cls/telegraph
   keep: false
   consec_fail: 0
-  last_ok: 2025-09-05T11:31:47+0800
+  last_ok: 2025-09-05T13:42:52+0800
   last_error: null
   ok: true
 - key: ft_cn
@@ -11,7 +11,7 @@
   url: https://www.ftchinese.com/rss/news
   keep: false
   consec_fail: 0
-  last_ok: 2025-09-05T11:31:47+0800
+  last_ok: 2025-09-05T13:42:52+0800
   last_error: null
   ok: true
 - key: investing
@@ -19,7 +19,7 @@
   url: https://www.investing.com/rss/121899.rss
   keep: false
   consec_fail: 0
-  last_ok: 2025-09-05T11:31:47+0800
+  last_ok: 2025-09-05T13:42:52+0800
   last_error: null
   ok: true
 - key: jiemian
@@ -27,6 +27,6 @@
   url: https://a.jiemian.com/index.php?m=article&a=rss
   keep: false
   consec_fail: 0
-  last_ok: 2025-09-05T11:31:47+0800
+  last_ok: 2025-09-05T13:42:52+0800
   last_error: null
   ok: true
