@@ -26,7 +26,7 @@ TZ = timezone(timedelta(hours=8))
 REQ_TIMEOUT = float(os.getenv("QWEN_TIMEOUT", "120"))
 
 QWEN_API = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-QWEN_MODEL = "qwen-flash-2025-07-28"
+QWEN_MODEL = "qwen-flash"
 
 def now_date():
     return datetime.now(TZ).strftime("%Y-%m-%d")
