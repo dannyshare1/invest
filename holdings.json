@@ -2,10 +2,11 @@
   {"symbol": "515080.SH", "name": "中证红利ETF", "weight": 0.51},
   {"symbol": "512480.SH", "name": "半导体ETF",  "weight": 0.02},
   {"symbol": "510300.SH", "name": "沪深300ETF", "weight": 0.11},
-  {"symbol": "511010.SH", "name": "国债ETF",    "weight": 0.09},
+  {"symbol": "511010.SH", "name": "国债ETF",    "weight": 0.08},
   {"symbol": "515650.SH", "name": "消费50ETF",  "weight": 0.03},
   {"symbol": "512010.SH", "name": "医药ETF",    "weight": 0.03},
   {"symbol": "159235.SH", "name": "中证现金流ETF",    "weight": 0.16},
   {"symbol": "513500",    "name": "博时标普500ETF", "weight": 0.01},
-  {"symbol": "513180",    "name": "恒生科技指数ETF", "weight": 0.04}
+  {"symbol": "513180",    "name": "恒生科技指数ETF", "weight": 0.04},
+  {"symbol": "560080",    "name": "中药ETF", "weight": 0.01}
 ]
