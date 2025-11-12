@@ -376,6 +376,7 @@ def build_prompt(holds: List[Dict], briefing: str) -> str:
     1) 前一交易日重点新闻摘要
     2) 仓位操作建议
     3) 可选:定投与止盈策略与触发条件
+    4) 值得关注的高预期低价格潜力股
         """).strip()
     
 async def main():
