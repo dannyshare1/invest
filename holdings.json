@@ -1,10 +1,15 @@
 [
-  {"symbol": "515080.SH", "name": "中证红利ETF", "weight": 0.20},
-  {"symbol": "512480.SH", "name": "半导体ETF",  "weight": 0.03},
-  {"symbol": "510300.SH", "name": "沪深300ETF", "weight": 0.05},
-  {"symbol": "511010.SH", "name": "国债ETF",    "weight": 0.53},
-  {"symbol": "512690",    "name": "酒ETF",  "weight": 0.01},
-  {"symbol": "512010.SH", "name": "医药ETF",    "weight": 0.06},
-  {"symbol": "159235.SH", "name": "中证现金流ETF",    "weight": 0.07},
-  {"symbol": "513180",    "name": "恒生科技指数ETF", "weight": 0.05}
+  {"symbol": "515080", "name": "中证红利ETF",    "weight": 0.33},
+  {"symbol": "512480", "name": "半导体ETF",      "weight": 0.05},
+  {"symbol": "510300", "name": "沪深300ETF",     "weight": 0.09},
+  {"symbol": "511010", "name": "国债ETF",        "weight": 0.19},
+  {"symbol": "159949", "name": "创业板50ETF",    "weight": 0.01},
+  {"symbol": "159545", "name": "恒生红利低波ETF", "weight": 0.01},
+  {"symbol": "512690", "name": "酒ETF",          "weight": 0.03},
+  {"symbol": "560080", "name": "中药ETF",        "weight": 0.01},
+  {"symbol": "512010", "name": "医药ETF",        "weight": 0.08},
+  {"symbol": "159235", "name": "中证现金流ETF",   "weight": 0.09},
+  {"symbol": "513330", "name": "恒生互联网ETF",   "weight": 0.01},
+  {"symbol": "000651", "name": "格力电器",        "weight": 0.02},
+  {"symbol": "513180", "name": "恒生科技指数ETF", "weight": 0.08}
   ]
