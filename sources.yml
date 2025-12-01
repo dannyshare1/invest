@@ -3,7 +3,7 @@
   url: https://www.investing.com/rss/121899.rss
   keep: false
   consec_fail: 0
-  last_ok: 2025-11-28T13:46:14+0800
+  last_ok: 2025-12-01T09:04:30+0800
   last_error: null
   ok: true
 - key: jiemian
@@ -11,6 +11,6 @@
   url: https://a.jiemian.com/index.php?m=article&a=rss
   keep: false
   consec_fail: 0
-  last_ok: 2025-11-28T13:46:14+0800
+  last_ok: 2025-12-01T09:04:30+0800
   last_error: null
   ok: true
