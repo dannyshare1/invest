@@ -1,39 +1,34 @@
-# Daily News & Investment Pipeline
+# Investment System
 
-一组 Python 脚本，用于抓取市场资讯、记录持仓变动，并生成每日投资提示。
+这个仓库是投资决策的唯一正式规则源（source of truth）。
 
-## 脚本介绍
+## 结构
 
-- `news_pipeline.py`
-  - 根据 `sources.yml` 中的 RSS 源和可选 API，结合 `holdings.json` 自动生成关键词
-  - 抓取新闻并输出 `briefing.txt`、`news_all.csv` 等文件，同时维护源的健康状态
-- `holdings_tracker.py`
-  - 比较 `holdings.json` 与历史快照，记录持仓增删改
-  - 更新 `holdings_log.csv`、`holdings_history.csv`
-- `daily_push_qwen.py`
-  - 读取 `briefing.txt` 与当前持仓
-  - 调用通义千问生成中文投资提示，并通过 Server 酱或 Telegram 推送
+- `.agents/skills/investment-rules/SKILL.md`：Codex/Agent 调用入口与工作流程。
+- `.agents/skills/investment-rules/references/CORE.md`：所有市场通用规则。
+- `.agents/skills/investment-rules/references/A_SHARE.md`：A股规则。
+- `.agents/skills/investment-rules/references/US_HK.md`：美股、港股与期权规则。
+- `.agents/skills/investment-rules/references/CHANGELOG.md`：正式规则变更记录。
+- `WATCHLIST.md`：当前重点观察标的与触发条件。
+- `TASKS.md`：未完成的投资检查、财报复核、买点/止盈/期权处理事项。
+- `CURRENT_VIEWS.md`：当前阶段性观点，不属于长期规则。
 
-## 使用示例
+## 使用原则
 
-```bash
-pip install -r requirements.txt
+1. 做任何投资决策前，先读取最新规则。
+2. 临时观点不能直接写进长期规则。
+3. 用户明确说“升格正式规则”时，才更新长期规则并写入 CHANGELOG。
+4. 买点、财报后复核、期权到期处理等未来事项写入 WATCHLIST / TASKS。
+5. 规则修改后，应同步检查现有投资定时任务是否存在冲突。
 
-# 更新持仓或源配置后依次运行：
-python news_pipeline.py      # 抓取并过滤新闻
-python holdings_tracker.py   # 记录持仓变化
-python daily_push_qwen.py    # 生成并推送提示
-```
+## Work 使用方式
 
-`news_pipeline.py` 会输出：
-- `briefing.txt`
-- `news_all.csv`
-- `keywords_used.txt` / `qwen_keywords.txt`
-- `sources_used.txt`
-- `errors.log`
+如果当前环境不能原生调用 Skill，则把本仓库当作规则库：做投资答疑前先读取 `CORE.md`，再根据市场读取 `A_SHARE.md` 或 `US_HK.md`，然后读取 `WATCHLIST.md`、`TASKS.md`、`CURRENT_VIEWS.md` 中与当前问题有关的内容。
 
-若需推送或调用额外 API，请设置相关环境变量（如 `QWEN_API_KEY`、`NEWSAPI_KEY`、`MEDIASTACK_KEY`、`SCKEY`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`）。
+## Codex 使用方式
 
-## 依赖管理
+在支持 Skill 的环境中调用：
 
-`requirements.txt` 中的依赖已固定版本以确保可重复运行，建议定期（例如每月或每季度）检查并更新这些版本，以获得安全补丁和兼容性修复。
+`$investment-rules`
+
+然后再提出具体投资问题。

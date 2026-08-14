@@ -1,6 +1,0 @@
-httpx==0.27.0
-python-dateutil==2.9.0.post0
-rich==14.1.0
-requests==2.32.4
-feedparser==6.0.11
-PyYAML==6.0.2
