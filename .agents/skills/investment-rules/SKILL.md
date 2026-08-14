@@ -1,53 +1,50 @@
 ---
 name: investment-rules
-description: Apply the user's durable investment rules before giving A-share, US/HK equity, ETF, portfolio, valuation, Sell Put, Covered Call, Wheel, earnings, buy/sell, or risk-management decisions.
+description: 在分析 A股、美股、港股、ETF、组合决策和期权时，应用用户的正式投资规则。
 ---
 
-# Investment Rules
+# 投资规则 Skill
 
-This skill is the executable entrypoint for the user's durable investment framework.
+## 1. 分析前先读取
 
-## Load order
-
-Always read:
+始终读取：
 
 1. `references/CORE.md`
-2. The relevant market file:
+2. 对应市场规则：
    - `references/A_SHARE.md`
    - `references/US_HK.md`
-3. If available and relevant, repository-root dynamic files:
+3. 有需要时再读取：
    - `WATCHLIST.md`
    - `TASKS.md`
    - `CURRENT_VIEWS.md`
 
-## Core workflow
+正式规则优先于临时观点。
 
-1. Identify market, security type, portfolio context, and whether options are involved.
-2. Fetch current, verifiable data before relying on an old conclusion.
-3. Separate facts from judgments.
-4. Recalculate valuation using current price and current earnings expectations when reliable data are available.
-5. Check cash, concentration, assignment exposure, and portfolio impact before recommending an action.
-6. Use technical levels only as secondary timing evidence.
-7. Give only a small number of executable actions, each with a price/valuation/event trigger and, when relevant, suggested size.
-8. If the conclusion is unchanged, explain why current data still support it.
+## 2. 决策流程
 
-## Rule update protocol
+每次做投资判断时：
 
-When the user says `升格正式规则`, `加入正式规则`, or clearly asks to make a principle durable:
+1. 使用当前可核实的行情、财务和组合数据。
+2. 重新检查基本面和估值，不机械重复旧结论。
+3. 同时应用 CORE 和对应市场规则。
+4. 考虑组合集中度、现金占用和期权风险。
+5. 技术分析只用于辅助择时。
+6. 只有存在明确优势时才给交易动作，并给出价格、估值或事件触发条件，以及合适的仓位建议。
 
-1. Decide whether it belongs in `CORE.md`, `A_SHARE.md`, or `US_HK.md`.
-2. Generalize it into a durable rule; do not preserve a one-day market opinion as policy.
-3. Update the relevant file.
-4. Add a dated entry to `references/CHANGELOG.md`.
-5. Check whether existing scheduled investment tasks contain conflicting embedded rules; update them when task-editing tools are available.
+如果没有值得做的动作，就明确说明。
 
-## Dynamic-state protocol
+## 3. 正式规则更新
 
-- A security being watched for a future trigger belongs in `WATCHLIST.md`.
-- A concrete unresolved future action belongs in `TASKS.md`.
-- A temporary market or company view belongs in `CURRENT_VIEWS.md`.
-- Never promote dynamic state into permanent rules unless the user explicitly asks.
+当用户明确确认某条原则为正式规则时：
 
-## Data discipline
+1. 更新 `CORE.md`、`A_SHARE.md` 或 `US_HK.md`。
+2. 在 `references/CHANGELOG.md` 记录变更。
+3. 如果可以修改定时任务，同时检查并更新受影响的投资定时任务。
 
-Never invent real-time prices, analyst consensus, account positions, option Greeks, or corporate events. Clearly label delayed or stale data. Prefer current account data, company filings/releases, exchange data, reputable market-data sources, and current consensus data when available.
+未经用户确认，不得把临时个股观点或交易计划自动升级成正式规则。
+
+## 4. 动态状态
+
+- `WATCHLIST.md`：正在观察的标的和触发条件。
+- `TASKS.md`：尚未完成的未来动作或复核事项。
+- `CURRENT_VIEWS.md`：临时的公司或市场观点。
