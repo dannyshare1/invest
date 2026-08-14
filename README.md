@@ -2,6 +2,12 @@
 
 用于投资决策的长期规则库。
 
+## 最简单的实操
+
+把这句话复制给 AI：
+
+> 请先读取本仓库的投资规则，再读取 `invest-private/STATE.md`；如果私有状态没有数据，请明确说不知道，不要猜。
+
 ## 文件结构
 
 - `.agents/skills/investment-rules/SKILL.md`
