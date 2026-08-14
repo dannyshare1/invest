@@ -13,10 +13,12 @@ description: 在分析 A股、美股、港股、ETF、组合决策和期权时�
 2. 对应市场规则：
    - `references/A_SHARE.md`
    - `references/US_HK.md`
-3. 有需要时再读取：
-   - `WATCHLIST.md`
-   - `TASKS.md`
-   - `CURRENT_VIEWS.md`
+
+凡涉及具体标的、组合或期权决策时，还必须读取：
+
+- `WATCHLIST.md`
+- `TASKS.md`
+- `CURRENT_VIEWS.md`
 
 正式规则优先于临时观点。
 
